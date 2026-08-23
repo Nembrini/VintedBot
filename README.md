@@ -36,6 +36,19 @@ Opzioni di `search`: `--keyword`, `--catalog ID`, `--brand ID`, `--size ID`,
 `--max-pages`, `--max-items`. Output: tabella ordinata per data di
 pubblicazione decrescente + riga di riepilogo.
 
+**Dedup tra esecuzioni**: per default vengono mostrati SOLO gli annunci
+mai visti prima; quelli mostrati vengono marcati nel DB SQLite
+(`VINTEDBOT_DB_PATH`). Esecuzioni ripetute mostrano quindi solo le novità
+("Nessun nuovo annuncio" è l'esito normale, exit code 0). Alla **prima
+esecuzione assoluta** il DB è vuoto: tutti i risultati appaiono come
+nuovi — è atteso.
+
+Flag aggiuntivi:
+- `--all` — modalità consultazione: mostra tutti i risultati, bypassa il
+  filtro e **non scrive nulla** nel DB;
+- `--purge-days N` — prima della ricerca elimina i record visti da più
+  di N giorni (N deve essere positivo).
+
 ## Comandi di sviluppo
 
 ```bash
@@ -60,6 +73,8 @@ src/vintedbot/     codice applicativo (tipizzato, py.typed)
   client.py        VintedClient async (curl_cffi, rate limit, retry)
   search.py        search_all: paginazione sequenziale + dedup + limiti
   db.py            SQLite: apertura, migrazioni (user_version), pragmas
+  repository.py    ItemRepository: tutte le query su seen_items (unico SQL)
+  app.py           orchestrazione: cerca → filtra visti → render → mark_seen
   cli.py           CLI argparse + tabella rich (unico layer con print)
   __main__.py      python -m vintedbot
 tests/             test pytest (+ fixtures/ con risposta API reale)
@@ -76,4 +91,6 @@ docs/api_notes.md  reverse engineering dell'endpoint di ricerca Vinted
 - [x] 1.6 CLI con output rich (`cli.py`)
 - [x] 1.7 Test suite (zero rete)
 - [x] 2.1 Modulo DB SQLite (`db.py`: schema seen_items, migrazioni)
-- [ ] 2.2 Repository (accesso dati per il flusso di ricerca)
+- [x] 2.2 Repository (`repository.py`: filter_new, mark_seen, purge, count)
+- [x] 2.3 Integrazione nel CLI (`app.py`: dedup tra esecuzioni, --all, --purge-days)
+- [ ] 2.4 Test end-to-end + verifica reale con doppia esecuzione
