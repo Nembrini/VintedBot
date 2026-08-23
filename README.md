@@ -43,11 +43,59 @@ mai visti prima; quelli mostrati vengono marcati nel DB SQLite
 esecuzione assoluta** il DB è vuoto: tutti i risultati appaiono come
 nuovi — è atteso.
 
+**Notifiche Telegram** (in costruzione — step 3): configura
+`TELEGRAM_BOT_TOKEN` e `TELEGRAM_CHAT_ID` nel `.env` (bot creato con
+@BotFather; ricorda di avviarlo con /start) e verifica con:
+
+```bash
+uv run vintedbot notify-test
+```
+
+Senza credenziali Telegram il comando `search` funziona comunque.
+
 Flag aggiuntivi:
 - `--all` — modalità consultazione: mostra tutti i risultati, bypassa il
-  filtro e **non scrive nulla** nel DB;
+  filtro, **non scrive nulla** nel DB e non notifica;
 - `--purge-days N` — prima della ricerca elimina i record visti da più
-  di N giorni (N deve essere positivo).
+  di N giorni (N deve essere positivo);
+- `--no-notify` — salta le notifiche Telegram (solo tabella).
+
+### Semantica visto / notificato
+
+Sono due momenti distinti:
+- **visto** (`first_seen_at`): l'annuncio è stato mostrato in tabella —
+  non riapparirà nelle esecuzioni successive;
+- **notificato** (`notified_at`): la notifica Telegram è partita DAVVERO.
+  Viene valorizzato solo a invio riuscito, item per item.
+
+Gli item "visti ma non notificati" (invio fallito, o oltre il limite
+anti-valanga) restano in coda e vengono **ritentati automaticamente** ai
+giri successivi. Un errore di configurazione (token invalido, chat non
+trovata) interrompe l'intera coda con exit code ≠ 0.
+
+**Anti-valanga**: al massimo `VINTEDBOT_MAX_NOTIFICATIONS_PER_RUN`
+notifiche per esecuzione (default 10), con una pausa di
+`VINTEDBOT_NOTIFY_PAUSE_SECONDS` tra gli invii (default 1s). Alla prima
+esecuzione su DB vuoto arrivano quindi al più 10 messaggi; il resto viene
+smaltito nei giri successivi.
+
+**Formato notifica**: album Telegram con TUTTE le foto dell'annuncio
+(max 10) e didascalia con titolo, prezzo, brand/taglia/condizione, data
+e ora di caricamento (fuso italiano) e link all'annuncio. Se Telegram
+non riesce a scaricare una foto (capita con il CDN Vinted:
+`WEBPAGE_CURL_FAILED`), il bot scarta solo quella e ritenta l'album;
+in ultima istanza degrada a foto singola e poi a solo testo — la
+notifica arriva comunque.
+
+### Procedura di collaudo dello step 3 (eseguita il 2026-08-23)
+
+1. Suite verde: `uv run pytest`. DB azzerato per stato noto.
+2. Run 1 (`--max-items 12`, cap 10): 12 nuovi → tabella, 10 notifiche
+   con album+data ricevute, 2 in coda → anti-valanga OK.
+3. Verifica DB: `notified_at` valorizzato solo per gli invii riusciti.
+4. Run 2 identica: 0 nuovi, coda arretrata smaltita, **zero doppioni**.
+5. Run 3 a coda vuota: "Nessun nuovo annuncio", zero notifiche, exit 0.
+6. Run 4 `--no-notify`: zero messaggi Telegram.
 
 ## Come funziona il tracking dei doppioni
 
@@ -106,6 +154,8 @@ src/vintedbot/     codice applicativo (tipizzato, py.typed)
   db.py            SQLite: apertura, migrazioni (user_version), pragmas
   repository.py    ItemRepository: tutte le query su seen_items (unico SQL)
   app.py           orchestrazione: cerca → filtra visti → render → mark_seen
+  notifier.py      TelegramNotifier (API Bot HTTP, retry, token mai nei log)
+  formatting.py    caption HTML per gli item (escaping, limite 1024)
   cli.py           CLI argparse + tabella rich (unico layer con print)
   __main__.py      python -m vintedbot
 tests/             test pytest (+ fixtures/ con risposta API reale)
@@ -124,4 +174,9 @@ docs/api_notes.md  reverse engineering dell'endpoint di ricerca Vinted
 - [x] 2.1 Modulo DB SQLite (`db.py`: schema seen_items, migrazioni)
 - [x] 2.2 Repository (`repository.py`: filter_new, mark_seen, purge, count)
 - [x] 2.3 Integrazione nel CLI (`app.py`: dedup tra esecuzioni, --all, --purge-days)
-- [ ] 2.4 Test end-to-end + verifica reale con doppia esecuzione
+- [x] 2.4 Collaudo reale end-to-end (doppia esecuzione + --all) — 2026-08-23
+- [x] 3.1 Notifier Telegram (`notifier.py` + `notify-test`) — verificato live
+- [x] 3.2 Notifica item con foto (`formatting.py`, `send_item`, `notify-test --with-item`) — verificata live
+- [x] 3.3 Notifiche nel flusso di ricerca (notified_at, retry arretrati, anti-valanga, --no-notify)
+- [x] 3.4 Collaudo end-to-end reale — 2026-08-23 (album foto + data caricamento aggiunti su richiesta)
+- [ ] 4. Stima del prezzo di mercato

@@ -17,6 +17,7 @@ import sys
 import time
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
@@ -29,6 +30,7 @@ from vintedbot.client import VintedError
 from vintedbot.config import get_settings
 from vintedbot.log import setup_logging
 from vintedbot.models import SearchFilters
+from vintedbot.notifier import TelegramConfigError, TelegramError, TelegramNotifier
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -95,6 +97,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "--purge-days", type=int, metavar="N",
         help="Prima della ricerca elimina dal DB i record visti da più di N giorni.",
     )
+    search.add_argument(
+        "--no-notify", action="store_true", dest="no_notify",
+        help="Salta le notifiche Telegram (solo tabella, come lo step 2).",
+    )
+
+    notify_test = subparsers.add_parser(
+        "notify-test",
+        help="Invia un messaggio di prova su Telegram per verificare le credenziali.",
+    )
+    notify_test.add_argument(
+        "--with-item", action="store_true", dest="with_item",
+        help="Invia una notifica di esempio (foto+didascalia) dal primo item "
+             "della fixture di test, senza chiamare Vinted.",
+    )
     return parser
 
 
@@ -155,6 +171,13 @@ def _summary_line(outcome: SearchOutcome, duration_seconds: float) -> str:
             f"[bold]{len(outcome.shown_items)}[/bold] nuovi / "
             f"{outcome.already_seen} già visti / {total_found} totali trovati"
         )
+    if outcome.notifications_enabled:
+        summary += (
+            f" · {outcome.notified} notifiche inviate / {outcome.notify_failed} fallite"
+            " (ritenteranno al prossimo giro)"
+        )
+        if outcome.notify_queue_remaining:
+            summary += f" · {outcome.notify_queue_remaining} in coda per i prossimi giri"
     summary += (
         f" · {outcome.result.pages_fetched} pagine · {duration_seconds:.1f}s"
         f" — DB: {outcome.tracked_total} item tracciati"
@@ -196,6 +219,7 @@ def _cmd_search(args: argparse.Namespace, console: Console, err_console: Console
                 max_items=args.max_items,
                 show_all=args.show_all,
                 purge_days=args.purge_days,
+                notify=not args.no_notify,
                 render=render,
             )
         )
@@ -212,14 +236,74 @@ def _cmd_search(args: argparse.Namespace, console: Console, err_console: Console
         if outcome.filter_bypassed:
             console.print("Nessun risultato trovato.")
         else:
-            console.print(
+            message = (
                 f"Nessun nuovo annuncio ({outcome.already_seen} già visti)"
                 f" — DB: {outcome.tracked_total} item tracciati"
             )
-        return 0
+            if outcome.notified or outcome.notify_failed:
+                # Anche senza nuovi, la coda arretrata può aver lavorato.
+                message += (
+                    f" · {outcome.notified} notifiche arretrate inviate"
+                    f" / {outcome.notify_failed} fallite"
+                )
+            console.print(message)
+    else:
+        console.print(_summary_line(outcome, duration))
 
-    console.print(_summary_line(outcome, duration))
+    if outcome.notify_error:
+        err_console.print(
+            f"[red]Notifiche interrotte:[/red] {outcome.notify_error} — "
+            "gli item non inviati ritenteranno al prossimo giro."
+        )
+        return 1
     return 0  # zero risultati non è un errore
+
+
+_FIXTURE_PATH = Path("tests/fixtures/catalog_items_page1.json")
+
+
+def _load_fixture_item() -> Item:
+    """First item of the test fixture, parsed with the real models."""
+    import json
+
+    from vintedbot.models import parse_items
+
+    raw = json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))
+    items = parse_items(raw["items"])
+    if not items:
+        raise ValueError("la fixture non contiene item parsabili")
+    return items[0]
+
+
+async def _send_test_message(item: Item | None) -> None:
+    async with TelegramNotifier() as notifier:
+        if item is not None:
+            await notifier.send_item(item)
+        else:
+            await notifier.send_text("VintedBot: notifiche configurate correttamente ✅")
+
+
+def _cmd_notify_test(args: argparse.Namespace, console: Console, err_console: Console) -> int:
+    item: Item | None = None
+    if args.with_item:
+        if not _FIXTURE_PATH.exists():
+            err_console.print(
+                f"[red]Fixture non trovata:[/red] {_FIXTURE_PATH} — lancia il comando "
+                "dalla radice del progetto."
+            )
+            return 2
+        item = _load_fixture_item()
+
+    try:
+        asyncio.run(_send_test_message(item))
+    except TelegramConfigError as exc:
+        err_console.print(f"[red]Configurazione mancante:[/red] {exc}")
+        return 2
+    except TelegramError as exc:
+        err_console.print(f"[red]Invio fallito:[/red] {exc}")
+        return 1
+    console.print("[green]Notifica di test inviata ✅ — controlla Telegram.[/green]")
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -233,6 +317,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "search":
         return _cmd_search(args, console, err_console)
+    if args.command == "notify-test":
+        return _cmd_notify_test(args, console, err_console)
     raise AssertionError("unreachable: argparse enforces a valid subcommand")
 
 

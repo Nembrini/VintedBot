@@ -10,7 +10,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, HttpUrl, field_validator
+from pydantic import AliasChoices, Field, HttpUrl, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
@@ -63,6 +63,34 @@ class Settings(BaseSettings):
         ge=1,
         le=2000,
         description="Default item cap for a paginated search.",
+    )
+    max_notifications_per_run: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description=(
+            "Anti-flood cap: max Telegram notifications per run. Items beyond "
+            "the cap stay unnotified and are drained on later runs."
+        ),
+    )
+    notify_pause_seconds: float = Field(
+        default=1.0,
+        ge=0,
+        le=30,
+        description="Pause between two Telegram sends (stay clear of API limits).",
+    )
+    telegram_bot_token: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("VINTEDBOT_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"),
+        description=(
+            "Telegram bot token (from @BotFather). Optional at type level: the "
+            "search CLI works without it; the notifier validates presence at use."
+        ),
+    )
+    telegram_chat_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("VINTEDBOT_TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID"),
+        description="Chat that receives the notifications.",
     )
     log_level: LogLevel = Field(
         default="INFO",

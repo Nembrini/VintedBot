@@ -156,6 +156,68 @@ def test_purge_rejects_non_positive_days(repo: ItemRepository, days: int) -> Non
     assert repo.count() == 1  # niente svuotamenti accidentali
 
 
+# ----------------------------------------------- mark_notified / get_unnotified
+
+
+def test_mark_notified_never_overwrites_existing_timestamp(
+    repo: ItemRepository, conn: sqlite3.Connection
+) -> None:
+    repo.mark_seen([make_item(1), make_item(2)])
+
+    assert repo.mark_notified([1]) == 1
+    first_ts = conn.execute(
+        "SELECT notified_at FROM seen_items WHERE item_id = 1"
+    ).fetchone()["notified_at"]
+    assert first_ts is not None
+
+    # Seconda marcatura: 0 righe aggiornate, timestamp INVARIATO.
+    assert repo.mark_notified([1, 2]) == 1  # solo l'item 2 era ancora NULL
+    assert (
+        conn.execute("SELECT notified_at FROM seen_items WHERE item_id = 1").fetchone()[
+            "notified_at"
+        ]
+        == first_ts
+    )
+
+
+def test_get_unnotified_rebuilds_items_and_respects_limit(repo: ItemRepository) -> None:
+    repo.mark_seen([make_item(i, price="12.50") for i in (1, 2, 3)])
+    repo.mark_notified([2])
+
+    pending = repo.get_unnotified(limit=10)
+
+    assert {item.id for item in pending} == {1, 3}
+    rebuilt = pending[0]
+    assert rebuilt.price.amount == Decimal("12.50")
+    assert rebuilt.brand == "Nike"
+    assert rebuilt.seller is None  # non persistito: va bene così
+    assert repo.count_unnotified() == 2
+    assert len(repo.get_unnotified(limit=1)) == 1
+
+
+def test_photo_urls_and_published_at_round_trip(repo: ItemRepository) -> None:
+    item = Item.model_validate(
+        {
+            "id": 7,
+            "title": "jeans",
+            "price": {"amount": "50.0", "currency_code": "EUR"},
+            "url": "https://www.vinted.it/items/7",
+            "user": {"id": 1, "login": "s"},
+            "photo": {
+                "url": "https://img/1.jpeg",
+                "high_resolution": {"timestamp": 1787478000},
+            },
+            "photos": [{"url": "https://img/1.jpeg"}, {"url": "https://img/2.jpeg"}],
+        }
+    )
+    repo.mark_seen([item])
+
+    rebuilt = repo.get_unnotified(limit=10)[0]
+
+    assert rebuilt.photo_urls == ("https://img/1.jpeg", "https://img/2.jpeg")
+    assert rebuilt.published_at == item.published_at  # aware, identico
+
+
 # ------------------------------------------------------- (i) round-trip prezzo
 
 

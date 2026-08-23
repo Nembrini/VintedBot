@@ -12,15 +12,16 @@ the DB itself, so tests can hand it a temporary file).
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import structlog
 
+from vintedbot.models import Item
+
 if TYPE_CHECKING:
     import sqlite3
-
-    from vintedbot.models import Item
 
 logger = structlog.get_logger(__name__)
 
@@ -103,8 +104,9 @@ class ItemRepository:
         with self._conn:  # BEGIN … COMMIT; rollback automatico su eccezione
             self._conn.executemany(
                 "INSERT OR IGNORE INTO seen_items"
-                " (item_id, title, price, currency, brand, url, first_seen_at, notified_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
+                " (item_id, title, price, currency, brand, size, condition,"
+                "  photo_url, photo_urls, published_at, url, first_seen_at, notified_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
                 rows,
             )
         inserted = self._conn.total_changes - changes_before
@@ -142,12 +144,78 @@ class ItemRepository:
         row = self._conn.execute("SELECT COUNT(*) AS n FROM seen_items").fetchone()
         return int(row["n"])
 
+    def mark_notified(self, item_ids: list[int]) -> int:
+        """Set ``notified_at`` (now, UTC ISO-8601) where it is still NULL.
+
+        Idempotent by construction: an existing ``notified_at`` is NEVER
+        overwritten. Returns the number of rows actually updated.
+        """
+        if not item_ids:
+            return 0
+
+        now_iso = datetime.now(tz=UTC).isoformat()
+        updated = 0
+        with self._conn:
+            for start in range(0, len(item_ids), _MAX_SQL_VARS):
+                chunk = item_ids[start : start + _MAX_SQL_VARS]
+                placeholders = ",".join("?" * len(chunk))
+                cursor = self._conn.execute(
+                    "UPDATE seen_items SET notified_at = ?"
+                    f" WHERE notified_at IS NULL AND item_id IN ({placeholders})",  # noqa: S608
+                    [now_iso, *chunk],
+                )
+                updated += cursor.rowcount
+
+        logger.info("items_marked_notified", requested=len(item_ids), updated=updated)
+        return updated
+
+    def get_unnotified(self, limit: int) -> list[Item]:
+        """Items still waiting for a notification, newest first.
+
+        Rebuilds :class:`Item` objects from the stored columns. Fields that
+        are not persisted (seller, published_at) are None; rows written
+        before schema v2 also lack size/condition/photo_url — their
+        notification degrades to text-only, by design.
+        """
+        rows = self._conn.execute(
+            "SELECT item_id, title, price, currency, brand, size, condition,"
+            "       photo_url, photo_urls, published_at, url"
+            " FROM seen_items WHERE notified_at IS NULL"
+            " ORDER BY first_seen_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+        items = [
+            Item.model_validate(
+                {
+                    "id": row["item_id"],
+                    "title": row["title"],
+                    "price": {"amount": row["price"], "currency": row["currency"]},
+                    "brand": row["brand"],
+                    "size": row["size"],
+                    "condition": row["condition"],
+                    "photo_url": row["photo_url"],
+                    "photo_urls": _photo_urls_from_json(row["photo_urls"]),
+                    "published_at": row["published_at"],
+                    "url": row["url"],
+                }
+            )
+            for row in rows
+        ]
+        logger.debug("unnotified_loaded", count=len(items), limit=limit)
+        return items
+
+    def count_unnotified(self) -> int:
+        """Rows still waiting for a notification (for queue logging)."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM seen_items WHERE notified_at IS NULL"
+        ).fetchone()
+        return int(row["n"])
+
     # ------------------------------------------------------------ internals
 
     @staticmethod
-    def _item_to_row(
-        item: Item, first_seen_at_iso: str
-    ) -> tuple[int, str, str, str, str | None, str, str]:
+    def _item_to_row(item: Item, first_seen_at_iso: str) -> tuple[object, ...]:
         """Single conversion point Item → DB row (Decimal as string, never float)."""
         return (
             item.id,
@@ -155,6 +223,22 @@ class ItemRepository:
             str(item.price.amount),
             item.price.currency,
             item.brand,
+            item.size,
+            item.condition,
+            item.photo_url,
+            json.dumps(list(item.photo_urls)) if item.photo_urls else None,
+            item.published_at.isoformat() if item.published_at else None,
             item.url,
             first_seen_at_iso,
         )
+
+
+def _photo_urls_from_json(raw: str | None) -> list[str]:
+    """Tolerant decode of the photo_urls JSON column (pre-v3 rows are NULL)."""
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return []
+    return [url for url in parsed if isinstance(url, str)] if isinstance(parsed, list) else []

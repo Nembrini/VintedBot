@@ -49,6 +49,20 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         """,
         "CREATE INDEX idx_seen_items_first_seen_at ON seen_items (first_seen_at)",
     ),
+    # v2 — campi necessari a ricostruire un Item notificabile dal DB
+    # (retry degli invii falliti, step 3.3). Nullable: le righe v1
+    # restano valide e producono notifiche solo-testo.
+    (
+        "ALTER TABLE seen_items ADD COLUMN size TEXT",
+        "ALTER TABLE seen_items ADD COLUMN condition TEXT",
+        "ALTER TABLE seen_items ADD COLUMN photo_url TEXT",
+    ),
+    # v3 — album di foto (JSON array di URL) e data di pubblicazione,
+    # per notifiche complete anche quando l'item è ricostruito dal DB.
+    (
+        "ALTER TABLE seen_items ADD COLUMN photo_urls TEXT",
+        "ALTER TABLE seen_items ADD COLUMN published_at TEXT",
+    ),
 )
 
 

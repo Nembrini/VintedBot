@@ -10,6 +10,7 @@ dependencies = [
     "pydantic-settings>=2.10",
     "rich>=13.7",
     "structlog>=25.4",
+    "tzdata>=2025.1",  # zoneinfo su Windows (Europe/Rome nelle notifiche)
 ]
 
 [project.scripts]

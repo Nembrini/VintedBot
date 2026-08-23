@@ -19,6 +19,8 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "VINTEDBOT_SEARCH_MAX_PAGES",
         "VINTEDBOT_SEARCH_MAX_ITEMS",
         "VINTEDBOT_DB_PATH",
+        "VINTEDBOT_MAX_NOTIFICATIONS_PER_RUN",
+        "VINTEDBOT_NOTIFY_PAUSE_SECONDS",
         "VINTEDBOT_LOG_LEVEL",
         "VINTEDBOT_LOG_JSON",
     ):

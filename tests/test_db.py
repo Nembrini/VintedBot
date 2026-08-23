@@ -24,6 +24,11 @@ EXPECTED_COLUMNS = {
     "price",
     "currency",
     "brand",
+    "size",        # v2
+    "condition",   # v2
+    "photo_url",   # v2
+    "photo_urls",    # v3
+    "published_at",  # v3
     "url",
     "first_seen_at",
     "notified_at",

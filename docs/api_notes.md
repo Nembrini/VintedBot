@@ -39,6 +39,18 @@ filtro sul sito e leggerli dall'URL della pagina catalogo
 (`catalog[]=2536&size_ids[]=208&price_to=20…`) o dalla XHR in DevTools →
 Network. Gli ID sono stabili e condivisi tra i domini nazionali.
 
+### ID utili scoperti (verificati live 2026-08-23)
+
+| Cosa | ID |
+|---|---|
+| Categoria: giacche/capispalla uomo | `2536` |
+| Categoria: jeans uomo | `257` |
+| Categoria: jeans donna | `183` |
+| Brand: Roberto Cavalli / Just Cavalli | `1965` / `20117` |
+| Taglie uomo M / L / XL | `208` / `209` / `210` (⚠ le taglie donna hanno ID diversi) |
+
+Ricerca brand: `GET /api/v2/brands?keyword=…` (stessa sessione anonima).
+
 ## 2. Autenticazione e anti-bot (il punto critico)
 
 1. **Serve una sessione anonima**: `GET https://www.vinted.it/` imposta i
