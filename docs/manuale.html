@@ -1,0 +1,957 @@
+<title>Manuale di VintedBot</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<style>
+  :root {
+    --ground:      #f1f4f3;
+    --surface:     #ffffff;
+    --surface-2:   #e7edeb;
+    --ink:         #121b1a;
+    --ink-soft:    #4b5956;
+    --ink-faint:   #788a86;
+    --line:        #d2dbd8;
+    --line-strong: #b6c4c0;
+    --accent:      #0c6f69;
+    --accent-ink:  #084f4a;
+    --accent-soft: #d8eae7;
+    --warn:        #8f4f13;
+    --warn-soft:   #f7ead9;
+    --crit:        #92302e;
+    --crit-soft:   #f8e2e0;
+    --term-ground: #0d1817;
+    --term-ink:    #d5e3df;
+    --term-dim:    #6f8480;
+    --term-accent: #58c9bd;
+
+    --step-1: clamp(0.74rem, 0.72rem + 0.1vw, 0.79rem);
+    --step0:  clamp(0.98rem, 0.94rem + 0.2vw, 1.06rem);
+    --step1:  clamp(1.16rem, 1.08rem + 0.4vw, 1.32rem);
+    --step2:  clamp(1.42rem, 1.26rem + 0.8vw, 1.85rem);
+    --step3:  clamp(1.9rem, 1.55rem + 1.7vw, 2.9rem);
+
+    --font-display: "Bricolage Grotesque", "Trebuchet MS", system-ui, sans-serif;
+    --font-body: "Source Serif 4", Georgia, "Times New Roman", serif;
+    --font-mono: "IBM Plex Mono", "Cascadia Mono", Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #0d1312;
+      --surface:     #141c1a;
+      --surface-2:   #1b2422;
+      --ink:         #e2eae8;
+      --ink-soft:    #a2b1ad;
+      --ink-faint:   #798a86;
+      --line:        #283432;
+      --line-strong: #3a4845;
+      --accent:      #4cc0b4;
+      --accent-ink:  #7ad6cb;
+      --accent-soft: #14302d;
+      --warn:        #d99f61;
+      --warn-soft:   #2c2217;
+      --crit:        #e28d87;
+      --crit-soft:   #311f1e;
+      --term-ground: #080f0e;
+      --term-ink:    #d5e3df;
+      --term-dim:    #6f8480;
+      --term-accent: #58c9bd;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:      #0d1312;
+    --surface:     #141c1a;
+    --surface-2:   #1b2422;
+    --ink:         #e2eae8;
+    --ink-soft:    #a2b1ad;
+    --ink-faint:   #798a86;
+    --line:        #283432;
+    --line-strong: #3a4845;
+    --accent:      #4cc0b4;
+    --accent-ink:  #7ad6cb;
+    --accent-soft: #14302d;
+    --warn:        #d99f61;
+    --warn-soft:   #2c2217;
+    --crit:        #e28d87;
+    --crit-soft:   #311f1e;
+    --term-ground: #080f0e;
+    --term-ink:    #d5e3df;
+    --term-dim:    #6f8480;
+    --term-accent: #58c9bd;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: var(--step0);
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .shell {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: clamp(1.5rem, 1rem + 2vw, 3.5rem) clamp(1rem, 0.6rem + 2vw, 2.5rem) 5rem;
+  }
+
+  /* ---------------------------------------------------------- intestazione */
+
+  .masthead {
+    display: flex;
+    flex-direction: column;
+    gap: 1.1rem;
+    padding-bottom: 2rem;
+    border-bottom: 2px solid var(--ink);
+  }
+
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: var(--step-1);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0;
+  }
+
+  h1 {
+    font-family: var(--font-display);
+    font-weight: 800;
+    font-size: var(--step3);
+    line-height: 1.02;
+    letter-spacing: -0.02em;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  .standfirst {
+    margin: 0;
+    max-width: 62ch;
+    font-size: var(--step1);
+    color: var(--ink-soft);
+  }
+
+  .masthead-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.4rem;
+    font-family: var(--font-mono);
+    font-size: var(--step-1);
+    color: var(--ink-faint);
+  }
+  .masthead-meta b { color: var(--ink-soft); font-weight: 500; }
+
+  /* ------------------------------------------------------------- impianto */
+
+  .layout {
+    display: grid;
+    gap: clamp(2rem, 1rem + 3vw, 3.5rem);
+    align-items: start;
+    margin-top: 2.5rem;
+  }
+
+  @media (min-width: 62rem) {
+    .layout { grid-template-columns: 15rem minmax(0, 1fr); }
+    .toc { position: sticky; top: 1.5rem; }
+  }
+
+  .toc { font-family: var(--font-display); }
+  .toc h2 {
+    font-size: var(--step-1);
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 0.9rem;
+  }
+  .toc ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.1rem; }
+  .toc a {
+    display: grid;
+    grid-template-columns: 1.7rem 1fr;
+    gap: 0.3rem;
+    padding: 0.35rem 0.5rem 0.35rem 0;
+    color: var(--ink-soft);
+    text-decoration: none;
+    font-size: 0.92rem;
+    line-height: 1.3;
+    border-radius: 3px;
+  }
+  .toc a span { font-family: var(--font-mono); color: var(--accent); font-size: 0.8rem; }
+  .toc a:hover { color: var(--ink); background: var(--surface-2); }
+  .toc a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  main { min-width: 0; display: grid; gap: 3.5rem; }
+
+  /* ------------------------------------------------------------- sezioni */
+
+  section { scroll-margin-top: 1.5rem; }
+
+  .step-head {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    align-items: baseline;
+    gap: 0.9rem;
+    margin-bottom: 1.1rem;
+    padding-bottom: 0.7rem;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .step-num {
+    font-family: var(--font-mono);
+    font-size: var(--step-1);
+    font-weight: 600;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-radius: 999px;
+    padding: 0.18rem 0.65rem;
+    letter-spacing: 0.04em;
+  }
+
+  h2.step-title {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: var(--step2);
+    letter-spacing: -0.015em;
+    line-height: 1.15;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  h3 {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: var(--step1);
+    letter-spacing: -0.01em;
+    margin: 2rem 0 0.6rem;
+    text-wrap: balance;
+  }
+
+  h4 {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    font-size: var(--step-1);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 1.6rem 0 0.5rem;
+  }
+
+  p { margin: 0 0 0.95rem; max-width: 68ch; }
+  section > p:last-child { margin-bottom: 0; }
+
+  ul, ol.prose { max-width: 68ch; padding-left: 1.2rem; margin: 0 0 1rem; }
+  li { margin-bottom: 0.4rem; }
+  li::marker { color: var(--accent); }
+
+  a { color: var(--accent-ink); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+
+  strong { font-weight: 600; }
+
+  code {
+    font-family: var(--font-mono);
+    font-size: 0.87em;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 0.08em 0.35em;
+    word-break: break-word;
+  }
+
+  /* ------------------------------------------------------------ terminale */
+
+  .term {
+    background: var(--term-ground);
+    border: 1px solid var(--line-strong);
+    border-radius: 6px;
+    overflow: hidden;
+    margin: 1.1rem 0 1.3rem;
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.12);
+  }
+
+  .term-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.42rem 0.8rem;
+    background: rgb(255 255 255 / 0.045);
+    border-bottom: 1px solid rgb(255 255 255 / 0.08);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--term-dim);
+  }
+
+  .term pre {
+    margin: 0;
+    padding: 0.9rem 1rem;
+    overflow-x: auto;
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    line-height: 1.55;
+    color: var(--term-ink);
+    tab-size: 2;
+  }
+
+  .term .p  { color: var(--term-accent); user-select: none; }
+  .term .c  { color: var(--term-dim); }
+  .term .o  { color: #9fb4af; }
+  .term .hl { color: #f0d9a0; }
+
+  /* --------------------------------------------------------------- riquadri */
+
+  .note {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    padding: 0.85rem 1.1rem;
+    border-radius: 0 5px 5px 0;
+    margin: 1.2rem 0;
+    max-width: 68ch;
+  }
+  .note.warn { border-left-color: var(--warn); background: var(--warn-soft); }
+  .note.crit { border-left-color: var(--crit); background: var(--crit-soft); }
+  .note p:last-child { margin-bottom: 0; }
+  .note-label {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--accent-ink);
+    margin-bottom: 0.3rem;
+  }
+  .note.warn .note-label { color: var(--warn); }
+  .note.crit .note-label { color: var(--crit); }
+
+  /* --------------------------------------------------------------- tabelle */
+
+  .table-wrap { overflow-x: auto; margin: 1.1rem 0 1.4rem; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+
+  table { border-collapse: collapse; width: 100%; font-size: 0.92rem; }
+
+  th, td { text-align: left; padding: 0.55rem 0.85rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  thead th {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    background: var(--surface-2);
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  td code { background: transparent; border: none; padding: 0; color: var(--accent-ink); }
+  .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  .pill {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 0.74rem;
+    font-weight: 600;
+    padding: 0.1rem 0.5rem;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .pill.ok   { background: var(--accent-soft); color: var(--accent-ink); }
+  .pill.warn { background: var(--warn-soft); color: var(--warn); }
+  .pill.crit { background: var(--crit-soft); color: var(--crit); }
+
+  /* ---------------------------------------------------------------- schede */
+
+  .cards { display: grid; gap: 0.9rem; margin: 1.2rem 0; }
+  @media (min-width: 42rem) { .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 0.9rem 1.05rem;
+  }
+  .card h4 { margin-top: 0; }
+  .card p { margin-bottom: 0; font-size: 0.94rem; }
+
+  .formula {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 6px 6px 0;
+    padding: 0.9rem 1.1rem;
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    line-height: 1.9;
+    overflow-x: auto;
+    margin: 1.1rem 0;
+  }
+  .formula b { color: var(--accent-ink); font-weight: 600; }
+
+  footer {
+    margin-top: 4rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--line);
+    color: var(--ink-faint);
+    font-size: 0.9rem;
+    max-width: 68ch;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    html { scroll-behavior: smooth; }
+  }
+</style>
+
+<div class="shell">
+
+  <header class="masthead">
+    <p class="eyebrow">Guida operativa</p>
+    <h1>Manuale di VintedBot</h1>
+    <p class="standfirst">Dalla prima ricerca a mano fino al bot che gira da solo ogni dieci minuti e ti scrive su Telegram quando trova un affare.</p>
+    <div class="masthead-meta">
+      <span>Progetto <b>C:\Users\filip\VintedBot</b></span>
+      <span>Tutti i comandi vanno dati <b>dentro quella cartella</b></span>
+    </div>
+  </header>
+
+  <div class="layout">
+
+    <nav class="toc" aria-label="Indice">
+      <h2>Indice</h2>
+      <ol>
+        <li><a href="#s1"><span>01</span> Preparare l'ambiente</a></li>
+        <li><a href="#s2"><span>02</span> Collegare Telegram</a></li>
+        <li><a href="#s3"><span>03</span> La prima ricerca</a></li>
+        <li><a href="#s4"><span>04</span> Leggere i risultati</a></li>
+        <li><a href="#s5"><span>05</span> Tarare il punteggio</a></li>
+        <li><a href="#s6"><span>06</span> Salvare le ricerche</a></li>
+        <li><a href="#s7"><span>07</span> Accendere l'automazione</a></li>
+        <li><a href="#s8"><span>08</span> Controllare che vada</a></li>
+        <li><a href="#ref"><span>—</span> Comandi al volo</a></li>
+        <li><a href="#guai"><span>—</span> Quando qualcosa non va</a></li>
+      </ol>
+    </nav>
+
+    <main>
+
+      <!-- ============================================================ 1 -->
+      <section id="s1">
+        <div class="step-head">
+          <span class="step-num">01</span>
+          <h2 class="step-title">Preparare l'ambiente</h2>
+        </div>
+
+        <p>Serve <strong>Python 3.12 o superiore</strong> e <strong>uv</strong>. Da dentro la cartella del progetto, un solo comando ricostruisce l'ambiente virtuale e installa tutte le dipendenze:</p>
+
+        <div class="term">
+          <div class="term-bar">PowerShell — C:\Users\filip\VintedBot</div>
+          <pre><span class="p">&gt;</span> uv sync</pre>
+        </div>
+
+        <p>Da qui in avanti ogni comando si scrive con il prefisso <code>uv run</code>: è quello che garantisce di usare il Python dell'ambiente del progetto e non quello di sistema.</p>
+
+        <p>La configurazione vive nel file <code>.env</code>, che <strong>non è versionato</strong> perché contiene le tue credenziali. Se dovessi ricrearlo, parti dal modello:</p>
+
+        <div class="term">
+          <div class="term-bar">PowerShell</div>
+          <pre><span class="p">&gt;</span> Copy-Item .env.example .env</pre>
+        </div>
+
+        <p>La voce più importante è dove il bot tiene i suoi dati:</p>
+
+        <div class="term">
+          <div class="term-bar">.env</div>
+          <pre>VINTEDBOT_DATA_DIR=C:\Users\filip\VintedBot\data</pre>
+        </div>
+
+        <p>Lì dentro finiscono database, log, lock e stato di salute. Deve essere un <strong>percorso assoluto</strong>: quando il bot parte dallo scheduler la cartella corrente è <code>C:\Windows\system32</code>, non quella del progetto, e un percorso relativo creerebbe i dati nel posto sbagliato.</p>
+
+        <div class="note warn">
+          <span class="note-label">Mai dentro OneDrive</span>
+          <p>La sincronizzazione tiene aperto il file del database mentre lo ricarica sul cloud: il risultato sono errori <code>database is locked</code> a caso e il rischio concreto di perdere il file <code>-wal</code> con le ultime transazioni. Se i dati finiscono in una cartella sincronizzata il bot te lo dice a ogni avvio.</p>
+        </div>
+      </section>
+
+      <!-- ============================================================ 2 -->
+      <section id="s2">
+        <div class="step-head">
+          <span class="step-num">02</span>
+          <h2 class="step-title">Collegare Telegram</h2>
+        </div>
+
+        <p>Le notifiche arrivano da un bot Telegram tutto tuo. Su Telegram cerca <strong>@BotFather</strong>, manda <code>/newbot</code>, scegli nome e username: ti risponde con un token. Poi <strong>apri una chat con il tuo bot e premi Avvia</strong> — senza quel passo Telegram non gli permette di scriverti.</p>
+
+        <p>Token e id della chat vanno nel <code>.env</code>:</p>
+
+        <div class="term">
+          <div class="term-bar">.env</div>
+          <pre>TELEGRAM_BOT_TOKEN=123456789:AA...
+TELEGRAM_CHAT_ID=123456789</pre>
+        </div>
+
+        <p>Verifica che tutto funzioni prima di andare avanti:</p>
+
+        <div class="term">
+          <div class="term-bar">PowerShell</div>
+          <pre><span class="p">&gt;</span> uv run vintedbot notify-test
+<span class="c"># e per vedere com'è fatta una notifica vera, foto comprese:</span>
+<span class="p">&gt;</span> uv run vintedbot notify-test --with-item</pre>
+        </div>
+
+        <p>La seconda variante usa un annuncio di esempio salvato nei test: <strong>non chiama Vinted</strong>, serve solo a farti vedere il formato del messaggio.</p>
+
+        <div class="note">
+          <span class="note-label">Il token non compare mai nei log</span>
+          <p>Token e chat id vengono mascherati in ogni riga di log, <strong>traceback inclusi</strong> — gli errori di rete tendono a incorporare l'URL della richiesta, che contiene il token. Senza credenziali il comando <code>search</code> funziona lo stesso: semplicemente non notifica.</p>
+        </div>
+      </section>
+
+      <!-- ============================================================ 3 -->
+      <section id="s3">
+        <div class="step-head">
+          <span class="step-num">03</span>
+          <h2 class="step-title">La prima ricerca</h2>
+        </div>
+
+        <p>Il comando <code>search</code> fa una ricerca al volo, senza salvare niente di permanente. Categoria, brand e taglia si indicano con gli <strong>ID numerici di Vinted</strong>, non con i nomi:</p>
+
+        <div class="term">
+          <div class="term-bar">PowerShell</div>
+          <pre><span class="p">&gt;</span> uv run vintedbot search --catalog 257 --brand 20117 --size 209 --max-price 100</pre>
+        </div>
+
+        <h3>Trovare gli ID che ti servono</h3>
+
+        <p>Vai su <strong>vinted.it</strong>, applica i filtri che vuoi usando l'interfaccia normale, poi guarda la barra degli indirizzi: gli ID sono lì, in chiaro, dentro parametri come <code>catalog[]=257</code> e <code>size_ids[]=209</code>. Quelli già mappati:</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Cosa</th><th>Opzione</th><th>ID</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Jeans uomo</td><td><code>--catalog</code></td><td class="num">257</td></tr>
+              <tr><td>Jeans donna</td><td><code>--catalog</code></td><td class="num">183</td></tr>
+              <tr><td>Giacche e capispalla uomo</td><td><code>--catalog</code></td><td class="num">2536</td></tr>
+              <tr><td>Roberto Cavalli</td><td><code>--brand</code></td><td class="num">1965</td></tr>
+              <tr><td>Just Cavalli</td><td><code>--brand</code></td><td class="num">20117</td></tr>
+              <tr><td>Taglie uomo M / L / XL</td><td><code>--size</code></td><td class="num">208 / 209 / 210</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="note warn">
+          <span class="note-label">Attenzione alle taglie</span>
+          <p>Gli ID delle taglie <strong>donna sono diversi</strong> da quelli uomo. Una M donna non è <code>208</code>: ricavala dall'URL come sopra.</p>
+        </div>
+
+        <h3>Le opzioni di <code>search</code></h3>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Opzione</th><th>A cosa serve</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>--keyword</code></td><td>Testo libero, come la barra di ricerca del sito</td></tr>
+              <tr><td><code>--catalog --brand --size --condition</code></td><td>ID numerici, <strong>ripetibili</strong>: scrivendo <code>--brand 1965 --brand 20117</code> cerchi in entrambi</td></tr>
+              <tr><td><code>--min-price --max-price</code></td><td>Fascia di prezzo in euro</td></tr>
+              <tr><td><code>--max-pages --max-items</code></td><td>Quanto scaricare. Ogni pagina sono 96 annunci: per un filtro di nicchia una pagina copre giorni</td></tr>
+              <tr><td><code>--all</code></td><td>Modalità consultazione: mostra <strong>tutto</strong>, anche il già visto, e non notifica</td></tr>
+              <tr><td><code>--no-notify</code></td><td>Solo tabella a schermo, nessun messaggio Telegram</td></tr>
+              <tr><td><code>--min-score N</code></td><td>Notifica solo gli annunci con punteggio affare ≥ N</td></tr>
+              <tr><td><code>--strict-score</code></td><td>Insieme a <code>--min-score</code>: scarta anche gli annunci senza punteggio</td></tr>
+              <tr><td><code>--purge-days N</code></td><td>Prima di cercare, dimentica quello che ha visto più di N giorni fa</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ============================================================ 4 -->
+      <section id="s4">
+        <div class="step-head">
+          <span class="step-num">04</span>
+          <h2 class="step-title">Leggere i risultati</h2>
+        </div>
+
+        <p>L'output è una tabella ordinata dal più recente, più una riga di riepilogo. Ma la cosa da capire davvero è che <strong>alla seconda esecuzione vedrai molti meno risultati</strong>, ed è giusto così.</p>
+
+        <h3>Visto e notificato sono due cose diverse</h3>
+
+        <div class="cards">
+          <div class="card">
+            <h4>Visto</h4>
+            <p>L'annuncio è comparso in tabella. Da quel momento è registrato nel database e <strong>non riapparirà</strong> nelle ricerche successive.</p>
+          </div>
+          <div class="card">
+            <h4>Notificato</h4>
+            <p>Il messaggio Telegram è <strong>partito davvero</strong>. Viene segnato solo a invio riuscito, uno per uno.</p>
+          </div>
+        </div>
+
+        <p>La distinzione serve a non perdere niente: un annuncio visto ma non notificato — perché l'invio è fallito, o perché era oltre il tetto anti-valanga — resta in coda e <strong>viene ritentato al giro dopo</strong>. Alla prima esecuzione su database vuoto tutto risulta nuovo e arrivano al massimo dieci messaggi: il resto si smaltisce nei giri successivi, con una pausa di un secondo tra un invio e l'altro per non irritare le API di Telegram.</p>
+
+        <p>Quindi <strong>«Nessun nuovo annuncio» è l'esito normale</strong>, non un errore: significa che da quando hai guardato l'ultima volta non è stato caricato niente che rispetti i tuoi filtri.</p>
+
+        <h3>Ricominciare da zero</h3>
+
+        <p>Se vuoi azzerare la memoria del bot — per esempio dopo aver cambiato completamente i filtri — cancella il file del database e i suoi due file di appoggio:</p>
+
+        <div class="term">
+          <div class="term-bar">PowerShell</div>
+          <pre><span class="p">&gt;</span> Remove-Item data\vintedbot.db*</pre>
+        </div>
+
+        <p>Verrà ricreato vuoto alla prossima esecuzione. Attenzione: <strong>perdi anche lo storico prezzi</strong>, quindi il punteggio affare tornerà «n/d» finché non si riempie di nuovo.</p>
+      </section>
+
+      <!-- ============================================================ 5 -->
+      <section id="s5">
+        <div class="step-head">
+          <span class="step-num">05</span>
+          <h2 class="step-title">Tarare il punteggio affare</h2>
+        </div>
+
+        <p>Ogni volta che il bot vede un annuncio ne registra il prezzo. Da quello storico ricava, per ogni combinazione di brand e categoria, <strong>quanto costa di solito</strong> un capo del genere — la mediana — e assegna un punteggio da 0 a 100.</p>
+
+        <div class="formula">
+          sconto&nbsp;&nbsp;&nbsp;&nbsp;= (mediana − prezzo) / mediana<br>
+          grezzo&nbsp;&nbsp;&nbsp;&nbsp;= min(sconto / <b>MAX_DISCOUNT</b>, 1) × 100<br>
+          fiducia&nbsp;&nbsp;&nbsp;= n / (n + <b>CONFIDENCE_K</b>)<br>
+          <b>punteggio</b> = grezzo × fiducia
+        </div>
+
+        <p>La seconda metà è quella che conta: il punteggio viene <strong>ridotto quando lo storico è povero</strong>. Con tre annunci di confronto il bot non si fida, e fa bene. Sotto <code>MIN_SAMPLE_SIZE</code> annunci non dà proprio un voto e scrive «n/d» — che è diverso da «non è un affare».</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Variabile <code>.env</code></th><th>Il tuo valore</th><th>Cosa cambia in pratica</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>VINTEDBOT_PRICING_MAX_DISCOUNT</code></td><td class="num">0.50<br><span style="color:var(--ink-faint);font-size:0.8em">default 0.60</span></td><td><strong>Abbassarlo rende la curva più generosa.</strong> A 0.50 uno sconto del 40% vale 76; a 0.60 lo stesso sconto varrebbe 63. L'hai tarato tu nel collaudo</td></tr>
+              <tr><td><code>VINTEDBOT_PRICING_CONFIDENCE_K</code></td><td class="num">10</td><td>Alzarlo rende il bot <strong>più prudente sui brand con poco storico</strong></td></tr>
+              <tr><td><code>VINTEDBOT_PRICING_MIN_SAMPLE_SIZE</code></td><td class="num">8</td><td>Sotto questa soglia nessun punteggio. Alzarlo = più «n/d» ma stime più solide</td></tr>
+              <tr><td><code>VINTEDBOT_PRICING_MAX_AGE_DAYS</code></td><td class="num">90</td><td>Quanto guardare indietro. Abbassarlo segue i prezzi correnti</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Guardare e provare lo storico</h3>
+
+        <div class="term">
+          <div class="term-bar">PowerShell</div>
+          <pre><span class="c"># quali combinazioni ho, con che campione e che mediana</span>
+<span class="p">&gt;</span> uv run vintedbot stats
+
+<span class="c"># quanto varrebbe un jeans Just Cavalli a 45 euro?</span>
+<span class="p">&gt;</span> uv run vintedbot stats --evaluate 45 --brand "just cavalli" --catalog 257</pre>
+        </div>
+
+        <p>Se lo storico è troppo magro puoi riempirlo senza toccare né il «già visto» né le notifiche:</p>
+
+        <div class="term">
+          <div class="term-bar">PowerShell</div>
+          <pre><span class="p">&gt;</span> uv run vintedbot backfill --catalog 257 --brand 20117 --max-pages 10</pre>
+        </div>
+
+        <div class="note">
+          <span class="note-label">Perché backfill ignora --max-price</span>
+          <p>Per sapere quanto costa <em>di solito</em> un capo servono anche i prezzi alti: filtrarli falserebbe la mediana verso il basso e farebbe sembrare affari annunci che non lo sono. Se passi <code>--max-price</code> il comando lo ignora e te lo dice.</p>
+        </div>
+
+        <h3>Filtrare le notifiche</h3>
+
+        <p>Senza <code>--min-score</code> il filtro è spento e ti arriva tutto. Con il filtro attivo:</p>
+
+        <ul>
+          <li>gli annunci <strong>senza punteggio passano comunque</strong> — meglio un falso allarme che un affare perso — salvo che tu aggiunga <code>--strict-score</code>;</li>
+          <li>un annuncio sotto soglia è scartato <strong>definitivamente</strong>: non torna a bussare ai giri successivi;</li>
+          <li>gli arretrati vengono rivalutati ogni volta con i criteri correnti, e la coda parte dai punteggi più alti — così se il tetto anti-valanga taglia, taglia le cose meno interessanti;</li>
+          <li>la tabella a schermo mostra sempre <strong>tutti</strong> i nuovi: il filtro agisce solo sulle notifiche.</li>
+        </ul>
+      </section>
+
+      <!-- ============================================================ 6 -->
+      <section id="s6">
+        <div class="step-head">
+          <span class="step-num">06</span>
+          <h2 class="step-title">Salvare le ricerche</h2>
+        </div>
+
+        <p>Scrivere ogni volta otto opzioni sulla riga di comando non è vita. Le ricerche ricorrenti stanno in <code>searches.toml</code>, nella cartella del progetto — file <strong>non versionato</strong>, è roba tua. I campi ricalcano esattamente le opzioni di <code>search</code>:</p>
+
+        <div class="term">
+          <div class="term-bar">searches.toml</div>
+          <pre><span class="c">[[search]]</span>
+name = <span class="hl">"cavalli-jeans"</span>      <span class="c"># identificativo, compare nei log</span>
+enabled = true
+catalog = 257                <span class="c"># jeans uomo</span>
+brand = [1965, 20117]        <span class="c"># Roberto Cavalli, Just Cavalli</span>
+size = [208, 209, 210]       <span class="c"># M, L, XL</span>
+max_price = 100
+max_pages = 1
+min_score = 60               <span class="c"># solo gli affari; assente = filtro spento</span>
+strict_score = false
+
+<span class="c">[[search]]</span>
+name = <span class="hl">"giubbotti-economici"</span>
+enabled = false              <span class="c"># in pausa: run-all la salta</span>
+catalog = 2536
+keyword = <span class="hl">"piumino"</span>
+max_price = 20</pre>
+        </div>
+
+        <p>Ogni campo «plurale» accetta un singolo ID o una lista. Il modello completo, commentato, è in <code>searches.example.toml</code>.</p>
+
+        <h3>Eseguirle tutte</h3>
+
+        <div class="term">
+          <div class="term-bar">PowerShell</div>
+          <pre><span class="c"># tutte quelle abilitate</span>
+<span class="p">&gt;</span> uv run vintedbot run-all
+
+<span class="c"># solo alcune: --only è ripetibile, una volta per nome</span>
+<span class="p">&gt;</span> uv run vintedbot run-all --only cavalli-jeans --only giubbotti-economici
+
+<span class="c"># prova generale: mostra tutto senza notificare e senza sporcare il DB</span>
+<span class="p">&gt;</span> uv run vintedbot run-all --dry-run</pre>
+        </div>
+
+        <p>Due dettagli utili: <code>--only</code> esegue una ricerca <strong>anche se è <code>enabled = false</code></strong>, perché chiederla per nome è già una scelta esplicita; e il tetto anti-valanga di dieci notifiche vale per <strong>l'intera esecuzione</strong>, non per singola ricerca, altrimenti con cinque ricerche salvate ti arriverebbero cinquanta messaggi.</p>
+
+        <p>Il «già visto» invece è <strong>globale</strong>: se due ricerche pescano lo stesso annuncio, lo vedi una volta sola.</p>
+      </section>
+
+      <!-- ============================================================ 7 -->
+      <section id="s7">
+        <div class="step-head">
+          <span class="step-num">07</span>
+          <h2 class="step-title">Accendere l'automazione</h2>
+        </div>
+
+        <p>Qui il bot smette di aspettare te. Il comando <code>schedule</code> registra un task nell'Utilità di pianificazione di Windows che esegue <code>run-all</code> da solo. <strong>Guarda sempre prima cosa sta per fare</strong>:</p>
+
+        <div class="term">
+          <div class="term-bar">PowerShell</div>
+          <pre><span class="c"># 1. mostra il riepilogo e l'XML esatto, senza toccare niente</span>
+<span class="p">&gt;</span> uv run vintedbot schedule install --dry-run
+
+<span class="c"># 2. registra davvero (chiede conferma prima di procedere)</span>
+<span class="p">&gt;</span> uv run vintedbot schedule install
+
+<span class="c"># 3. controlla stato, ultimo risultato e prossima partenza</span>
+<span class="p">&gt;</span> uv run vintedbot schedule status</pre>
+        </div>
+
+        <p>Puoi cambiare la cadenza al volo senza toccare il <code>.env</code>:</p>
+
+        <div class="term">
+          <div class="term-bar">PowerShell</div>
+          <pre><span class="p">&gt;</span> uv run vintedbot schedule install --interval 15 --random-delay 5</pre>
+        </div>
+
+        <h3>Com'è configurato, e perché</h3>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Impostazione</th><th>Valore</th><th>Motivo</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Frequenza</td><td class="num">10 min + 0–3 casuali</td><td>Un polling perfettamente regolare è il segnale più riconoscibile che un bot possa emettere. Il ritardo casuale lo sfuma</td></tr>
+              <tr><td>Orario</td><td>24 ore su 24</td><td>Di notte c'è meno concorrenza sugli affari: è proprio quando conviene esserci</td></tr>
+              <tr><td>Accesso utente</td><td>non necessario</td><td>Gira anche a PC bloccato, <strong>senza salvare la password di Windows</strong> da nessuna parte</td></tr>
+              <tr><td>Finestre a schermo</td><td>nessuna</td><td>Senza sessione interattiva il processo gira in sessione 0, dove una finestra non può proprio comparire</td></tr>
+              <tr><td>Sovrapposizioni</td><td>la nuova non parte</td><td>Doppia cintura: lo scheduler la blocca e comunque il lock farebbe uscire il secondo processo</td></tr>
+              <tr><td>A batteria</td><td>parte e prosegue</td><td>È un portatile</td></tr>
+              <tr><td>Dopo spegnimento</td><td>recupera, non sveglia</td><td>L'esecuzione persa viene recuperata alla riaccensione, ma il PC non viene svegliato apposta</td></tr>
+              <tr><td>Privilegi</td><td>utente normale</td><td>Nessun amministratore richiesto</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Spegnere tutto</h3>
+
+        <div class="term">
+          <div class="term-bar">PowerShell</div>
+          <pre><span class="p">&gt;</span> uv run vintedbot schedule uninstall</pre>
+        </div>
+
+        <p>Rimuove il task e anche la cartella <code>\VintedBot\</code> nell'Utilità di pianificazione. È <strong>idempotente</strong>: se non c'era niente da rimuovere te lo dice e basta, senza trattarlo come un errore. I dati e lo storico restano intatti — spegni l'automatismo, non il bot.</p>
+
+        <div class="note">
+          <span class="note-label">Se preferisci l'interfaccia grafica</span>
+          <p>Il task compare in <strong>Utilità di pianificazione → Libreria → VintedBot → run-all</strong>. Da lì puoi disabilitarlo temporaneamente, forzare un'esecuzione con «Esegui», o leggere la cronologia.</p>
+        </div>
+      </section>
+
+      <!-- ============================================================ 8 -->
+      <section id="s8">
+        <div class="step-head">
+          <span class="step-num">08</span>
+          <h2 class="step-title">Controllare che vada</h2>
+        </div>
+
+        <p>Un comando solo ti dice se il bot è vivo, senza aprire nessun file:</p>
+
+        <div class="term">
+          <div class="term-bar">PowerShell</div>
+          <pre><span class="p">&gt;</span> uv run vintedbot doctor</pre>
+        </div>
+
+        <div class="term">
+          <div class="term-bar">Output</div>
+          <pre><span class="o">Controllo             Valore                                    Esito</span>
+Cartella dati         C:\Users\filip\VintedBot\data             <span class="hl">ok</span>
+Database              ...\vintedbot.db 368 KB · schema v5       <span class="hl">ok</span>
+                      seen_items 101 · price_observations 633
+Log                   ...\logs\vintedbot.log 7.9 KB             <span class="hl">ok</span>
+Lock                  libero                                    <span class="hl">ok</span>
+Ultima esecuzione     2026-08-23 17:32 (12 min fa)              <span class="hl">ok</span>
+                      esito ok · exit 0 · 14.0s · avvio scheduler · 7 notificati
+Schedulazione         \VintedBot\run-all                        <span class="hl">ok</span>
+                      stato Ready · risultato 0x0 · prossima 17:52
+Ricerche salvate      1 attive: cavalli-jeans                   <span class="hl">ok</span>
+Credenziali Telegram  token e chat id configurati               <span class="hl">ok</span></pre>
+        </div>
+
+        <p>Regge un database assente o corrotto e un'Utilità di pianificazione che non risponde: te lo dice, non esplode. Esce con codice diverso da zero <strong>solo se c'è un guasto vero</strong> — un «attenzione» è una cosa da fare, non una rottura.</p>
+
+        <h3>I codici che vedi nell'Utilità di pianificazione</h3>
+
+        <p>Nella colonna «Ultimo risultato esecuzione» Windows mostra il codice in esadecimale:</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Codice</th><th>Nella GUI</th><th>Significato</th></tr>
+            </thead>
+            <tbody>
+              <tr><td class="num">0</td><td class="num">0x0</td><td><span class="pill ok">tutto bene</span> successo, anche con zero risultati</td></tr>
+              <tr><td class="num">1</td><td class="num">0x1</td><td><span class="pill crit">guasto</span> errore durante l'esecuzione</td></tr>
+              <tr><td class="num">2</td><td class="num">0x2</td><td><span class="pill crit">guasto</span> configurazione invalida: <code>.env</code>, <code>searches.toml</code>, <code>.venv</code></td></tr>
+              <tr><td class="num">3</td><td class="num">0x3</td><td><span class="pill ok">normale</span> il giro precedente non era finito. <strong>Non è un guasto</strong> e non genera notifiche</td></tr>
+              <tr><td class="num">4</td><td class="num">0x4</td><td><span class="pill warn">da guardare</span> il watchdog ha fermato un'esecuzione troppo lunga</td></tr>
+              <tr><td class="num">—</td><td class="num">0x41301</td><td><span class="pill ok">normale</span> non è nostro: è Windows che dice «in esecuzione adesso»</td></tr>
+              <tr><td class="num">—</td><td class="num">0x41303</td><td><span class="pill ok">normale</span> non è nostro: «mai eseguito»</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Quando il bot si rompe davvero</h3>
+
+        <p>Ricevi un messaggio Telegram breve con il tipo di errore e dove è successo — mai il traceback, mai i segreti, quelli restano nel log. Per non sommergerti, <strong>lo stesso errore viene notificato al massimo una volta ogni sei ore</strong>; un errore diverso passa subito. Al primo giro riuscito dopo dei fallimenti arriva un «✅ VintedBot è tornato operativo dopo N esecuzioni fallite», perché il silenzio da solo non ti direbbe mai che è tornato.</p>
+
+        <p>Se il guasto è Telegram stesso — token revocato, API irraggiungibili — non si tenta di avvisarti via Telegram: resta nel log, che è tutto quello che si può onestamente fare.</p>
+
+        <h3>Leggere i log</h3>
+
+        <div class="term">
+          <div class="term-bar">PowerShell</div>
+          <pre><span class="c"># le ultime 40 righe</span>
+<span class="p">&gt;</span> Get-Content data\logs\vintedbot.log -Tail 40
+
+<span class="c"># solo gli inizi e le fini di esecuzione</span>
+<span class="p">&gt;</span> Select-String "run_started|run_finished" data\logs\vintedbot.log | Select-Object -Last 20</pre>
+        </div>
+
+        <p>Ogni esecuzione apre con <code>run_started</code> e chiude con <code>run_finished</code>, entrambe con lo stesso <code>run_id</code>: filtrando per quell'id ricostruisci un'esecuzione, leggendo il file ricostruisci una giornata. Ogni riga porta anche <code>trigger=scheduler</code> o <code>trigger=manual</code>, così distingui a colpo d'occhio un giro automatico da uno lanciato da te.</p>
+      </section>
+
+      <!-- ============================================================ ref -->
+      <section id="ref">
+        <div class="step-head">
+          <span class="step-num">↯</span>
+          <h2 class="step-title">Comandi al volo</h2>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Voglio…</th><th>Comando</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Sapere se il bot sta bene</td><td><code>uv run vintedbot doctor</code></td></tr>
+              <tr><td>Cercare adesso, una volta</td><td><code>uv run vintedbot run-all</code></td></tr>
+              <tr><td>Provare senza notificare</td><td><code>uv run vintedbot run-all --dry-run</code></td></tr>
+              <tr><td>Eseguire una sola ricerca salvata</td><td><code>uv run vintedbot run-all --only nome</code></td></tr>
+              <tr><td>Una ricerca al volo, non salvata</td><td><code>uv run vintedbot search --catalog 257 --max-price 50</code></td></tr>
+              <tr><td>Rivedere tutto, anche il già visto</td><td><code>uv run vintedbot search --catalog 257 --all</code></td></tr>
+              <tr><td>Controllare Telegram</td><td><code>uv run vintedbot notify-test</code></td></tr>
+              <tr><td>Guardare lo storico prezzi</td><td><code>uv run vintedbot stats</code></td></tr>
+              <tr><td>Riempire lo storico</td><td><code>uv run vintedbot backfill --catalog 257 --brand 20117</code></td></tr>
+              <tr><td>Vedere lo stato dell'automazione</td><td><code>uv run vintedbot schedule status</code></td></tr>
+              <tr><td>Spegnere l'automazione</td><td><code>uv run vintedbot schedule uninstall</code></td></tr>
+              <tr><td>Spostare i dati altrove</td><td><code>uv run vintedbot migrate-data --to D:\percorso</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p>Ogni comando accetta <code>--help</code>, e il flag globale <code>--verbose</code> mostra i log anche a schermo quando vuoi vedere cosa sta succedendo dentro.</p>
+      </section>
+
+      <!-- ============================================================ guai -->
+      <section id="guai">
+        <div class="step-head">
+          <span class="step-num">⚠</span>
+          <h2 class="step-title">Quando qualcosa non va</h2>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Sintomo</th><th>Cosa sta succedendo</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>«Nessun nuovo annuncio»</strong></td>
+                <td>Va tutto bene. Nessuno ha caricato niente che rispetti i tuoi filtri da quando hai guardato l'ultima volta. Per rivedere anche il già visto: <code>--all</code></td>
+              </tr>
+              <tr>
+                <td><strong>Esce con 3 e non fa niente</strong></td>
+                <td>Un'altra esecuzione è ancora in corso. È l'esito previsto quando lo scheduler parte mentre il giro precedente non è finito: non è un guasto</td>
+              </tr>
+              <tr>
+                <td><strong>Non arriva nessuna notifica</strong></td>
+                <td>Controlla con <code>doctor</code> che le credenziali risultino configurate, poi <code>notify-test</code>. Ricorda che devi aver premuto <strong>Avvia</strong> nella chat col tuo bot</td>
+              </tr>
+              <tr>
+                <td><strong>Notifiche doppie</strong></td>
+                <td>Quasi sempre è <code>--ignore-lock</code>: esiste solo per il debug e permette a due esecuzioni di sovrapporsi. Non usarlo nell'uso normale</td>
+              </tr>
+              <tr>
+                <td><strong>Il punteggio è sempre «n/d»</strong></td>
+                <td>Lo storico per quella combinazione di brand e categoria è sotto <code>MIN_SAMPLE_SIZE</code>. Riempilo con <code>backfill</code>, oppure aspetta qualche giorno</td>
+              </tr>
+              <tr>
+                <td><strong>Il task non parte mai</strong></td>
+                <td>Il PC era spento o sospeso: non viene svegliato apposta. Verifica «prossima esecuzione» con <code>schedule status</code>; se il risultato è <code>0x2</code>, manca <code>.venv</code> o <code>.env</code> — leggi <code>data\logs\launcher.log</code></td>
+              </tr>
+              <tr>
+                <td><strong>«Attenzione: cartella sincronizzata»</strong></td>
+                <td>I dati sono dentro OneDrive o simili. Spostali con <code>migrate-data --to</code>, che usa il backup nativo di SQLite e verifica i conteggi prima e dopo — una copia manuale del solo <code>.db</code> perderebbe le transazioni nel file <code>-wal</code></td>
+              </tr>
+              <tr>
+                <td><strong>Esce con 4</strong></td>
+                <td>Il watchdog ha fermato un'esecuzione oltre i dieci minuti, per impedirle di tenere il lock e affamare tutte le successive. Il log elenca le ricerche rimaste fuori</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="note crit">
+          <span class="note-label">Una regola da non violare mai</span>
+          <p>Il token Telegram va <strong>solo</strong> nel file <code>.env</code>, che è escluso dal versionamento. Mai in <code>.env.example</code>, mai in un file di backup dentro la cartella del progetto, mai in un commit. Se ci finisce per sbaglio, l'unico rimedio davvero risolutivo è <strong>revocarlo da @BotFather</strong> con <code>/revoke</code> e generarne uno nuovo: rimuovere il file dopo il commit non basta.</p>
+        </div>
+      </section>
+
+      <footer>
+        <p>VintedBot usa l'endpoint interno di Vinted, che non è una API pubblica: uso personale, volumi bassi, rate limiting prudente. Il riferimento tecnico completo è nel <code>README.md</code> del progetto; gli ID e il reverse engineering dell'endpoint stanno in <code>docs/api_notes.md</code>.</p>
+      </footer>
+
+    </main>
+  </div>
+</div>

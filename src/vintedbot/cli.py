@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import re
 import sqlite3
 import statistics
 import sys
 import time
 import uuid
+from contextlib import closing
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from enum import IntEnum
@@ -26,26 +28,37 @@ from typing import TYPE_CHECKING
 
 import structlog
 from pydantic import ValidationError
+from rich import box
 from rich.console import Console
+from rich.syntax import Syntax
 from rich.table import Table
 
 from vintedbot import __version__
 from vintedbot.app import run_all, run_backfill, run_search
 from vintedbot.client import VintedError
-from vintedbot.config import get_settings
-from vintedbot.health import HealthReporter
-from vintedbot.lock import LockBusyError, SingleInstanceLock
-from vintedbot.log import bind_run_context, setup_logging_from_settings
+from vintedbot.config import Settings, get_settings
+from vintedbot.health import HealthReporter, HealthState
+from vintedbot.lock import LockBusyError, SingleInstanceLock, probe_lock
+from vintedbot.log import LOG_FILENAME, bind_run_context, setup_logging_from_settings
 from vintedbot.models import SearchFilters
 from vintedbot.notifier import TelegramConfigError, TelegramError, TelegramNotifier
 from vintedbot.paths import cloud_sync_marker
+from vintedbot.schedule import (
+    LAUNCHER_RELATIVE_PATH,
+    SchedulerError,
+    TaskSpec,
+    TaskStatus,
+    build_task_xml,
+    install_task,
+    task_status,
+    uninstall_task,
+)
 from vintedbot.searches import SearchConfigError, load_searches
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from vintedbot.app import RunAllOutcome, SearchOutcome
-    from vintedbot.config import Settings
     from vintedbot.models import Item
     from vintedbot.pricing import PriceEstimate
 
@@ -207,6 +220,39 @@ def _build_parser() -> argparse.ArgumentParser:
     migrate.add_argument(
         "--to", type=Path, required=True, metavar="PATH",
         help="Percorso di destinazione (file .db o directory).",
+    )
+
+    schedule = subparsers.add_parser(
+        "schedule",
+        help="Registra (o rimuove) l'esecuzione automatica nel Task Scheduler di Windows.",
+    )
+    schedule_actions = schedule.add_subparsers(dest="schedule_action", required=True)
+
+    schedule_install = schedule_actions.add_parser(
+        "install", help="Registra il task che esegue run-all a intervalli regolari."
+    )
+    schedule_install.add_argument(
+        "--dry-run", action="store_true", dest="dry_run",
+        help="Stampa l'XML e il comando che verrebbero eseguiti, senza toccare il sistema.",
+    )
+    schedule_install.add_argument(
+        "--interval", type=int, metavar="MIN", dest="interval",
+        help="Minuti tra un'esecuzione e l'altra (default da config).",
+    )
+    schedule_install.add_argument(
+        "--random-delay", type=int, metavar="MIN", dest="random_delay",
+        help="Ritardo casuale aggiunto a ogni partenza (default da config).",
+    )
+    schedule_install.add_argument(
+        "--yes", action="store_true", dest="assume_yes",
+        help="Non chiedere conferma (per uso non interattivo).",
+    )
+    schedule_actions.add_parser("uninstall", help="Rimuove il task registrato.")
+    schedule_actions.add_parser("status", help="Mostra lo stato del task registrato.")
+
+    subparsers.add_parser(
+        "doctor",
+        help="Diagnosi: dati, lock, ultima esecuzione, schedulazione, credenziali.",
     )
     return parser
 
@@ -422,7 +468,8 @@ def _cmd_run_all(args: argparse.Namespace, console: Console, err_console: Consol
         _render_items_table(console, items, estimates)
 
     run_id = uuid.uuid4().hex[:8]
-    bind_run_context(run_id=run_id)
+    trigger = invocation_trigger()
+    bind_run_context(run_id=run_id, trigger=trigger)
     enabled_names = [search.name for search in searches if search.enabled]
 
     lock: SingleInstanceLock | None = None
@@ -489,6 +536,7 @@ def _cmd_run_all(args: argparse.Namespace, console: Console, err_console: Consol
         run_id=run_id,
         duration=duration,
         dry_run=args.dry_run,
+        trigger=trigger,
     )
 
 
@@ -502,9 +550,22 @@ def _finish_run(  # noqa: PLR0913 — è il punto in cui tutti i fili si annodan
     run_id: str,
     duration: float,
     dry_run: bool,
+    trigger: str,
 ) -> int:
     """Log the closing line, report health, and pick the exit code."""
     reporter = HealthReporter(settings)
+    totals = _run_totals(outcome) if outcome is not None else None
+
+    def finish(code: ExitCode, label: str) -> int:
+        """Last thing before exiting: `doctor` reads this, not the log file."""
+        reporter.record_last_run(
+            outcome=label,
+            exit_code=int(code),
+            duration_seconds=duration,
+            trigger=trigger,
+            totals=totals,
+        )
+        return int(code)
 
     if failure is not None or outcome is None:
         error = failure or RuntimeError("esecuzione terminata senza risultato")
@@ -516,10 +577,10 @@ def _finish_run(  # noqa: PLR0913 — è il punto in cui tutti i fili si annodan
             f"[red]Esecuzione fallita:[/red] {type(error).__name__} — "
             f"dettagli nel log ({settings.log_dir / 'vintedbot.log'})."
         )
-        return ExitCode.ERROR
+        return finish(ExitCode.ERROR, "crash")
 
     console.print(_run_all_summary(outcome, duration, dry_run=dry_run))
-    totals = _run_totals(outcome)
+    assert totals is not None  # noqa: S101 - outcome non e' None in questo ramo
     logger.info(
         "run_finished",
         run_id=run_id,
@@ -547,7 +608,7 @@ def _finish_run(  # noqa: PLR0913 — è il punto in cui tutti i fili si annodan
                 context="watchdog",
             )
         )
-        return ExitCode.TIMEOUT
+        return finish(ExitCode.TIMEOUT, "timeout")
 
     if outcome.aborted_reason is not None:
         err_console.print(
@@ -558,7 +619,7 @@ def _finish_run(  # noqa: PLR0913 — è il punto in cui tutti i fili si annodan
         asyncio.run(
             reporter.report_failure(TelegramError(outcome.aborted_reason), context="notifiche")
         )
-        return ExitCode.ERROR
+        return finish(ExitCode.ERROR, "interrotto")
 
     if outcome.failed_count:
         asyncio.run(
@@ -566,10 +627,10 @@ def _finish_run(  # noqa: PLR0913 — è il punto in cui tutti i fili si annodan
                 RuntimeError(f"{outcome.failed_count} ricerche fallite"), context="run-all"
             )
         )
-        return ExitCode.ERROR
+        return finish(ExitCode.ERROR, "errore")
 
     asyncio.run(reporter.report_success())
-    return ExitCode.OK
+    return finish(ExitCode.OK, "ok")
 
 
 def _run_totals(outcome: RunAllOutcome) -> dict[str, int]:
@@ -731,8 +792,6 @@ def _cmd_backfill(args: argparse.Namespace, console: Console, err_console: Conso
 
 def _cmd_stats(args: argparse.Namespace, console: Console, err_console: Console) -> int:
     """Per-(brand, catalog) history table, or --evaluate for one price."""
-    from contextlib import closing
-
     from vintedbot.db import get_connection
     from vintedbot.pricing import estimate
     from vintedbot.repository import PriceRepository
@@ -883,6 +942,344 @@ def _cmd_migrate_data(args: argparse.Namespace, console: Console, err_console: C
     return ExitCode.OK
 
 
+def invocation_trigger() -> str:
+    """How this execution was started: ``scheduler`` or ``manual``.
+
+    The launcher exports ``VINTEDBOT_INVOKED_BY``; preferring an
+    environment variable to a CLI flag keeps the task's command line
+    identical to the one you would type by hand, so the two are
+    reproducible from each other.
+    """
+    source = os.environ.get("VINTEDBOT_INVOKED_BY", "").strip().lower()
+    return source or "manual"
+
+
+def project_dir() -> Path:
+    """Root of the checkout: where ``.env``, ``searches.toml`` and ``scripts/`` live."""
+    candidate = Path(__file__).resolve().parents[2]
+    if (candidate / LAUNCHER_RELATIVE_PATH).exists():
+        return candidate
+    return Path.cwd().resolve()
+
+
+#: Windows shows the task's exit code as "Ultimo risultato esecuzione".
+#: Ours are 0-4; the 0x413xx ones are the scheduler's own.
+_TASK_RESULT_MEANING = {
+    0: "ok",
+    1: "errore durante l'esecuzione",
+    2: "configurazione invalida",
+    3: "già in esecuzione — non è un guasto",
+    4: "watchdog: durata massima superata",
+    0x41300: "task pronto, mai eseguito",
+    0x41301: "esecuzione in corso",
+    0x41303: "mai eseguito",
+    0x41306: "esecuzione terminata dall'utente",
+}
+
+
+def _schedule_preview(spec: TaskSpec, settings: Settings) -> Table:
+    """Human-readable summary of what would be registered."""
+    table = Table(title="Task da registrare", show_header=False, box=box.SIMPLE)
+    table.add_column("Voce", style="bold")
+    table.add_column("Valore")
+    jitter = (
+        f" (+ fino a {spec.random_delay_minutes} min casuali)"
+        if spec.random_delay_minutes
+        else ""
+    )
+    table.add_row("Nome", spec.task_name)
+    table.add_row("Esegue", str(spec.command))
+    table.add_row("Cartella di lavoro", str(spec.working_directory))
+    table.add_row("Frequenza", f"ogni {spec.interval_minutes} minuti{jitter}, 24 ore su 24")
+    table.add_row("Utente", f"{spec.user_id} — S4U: nessuna password salvata")
+    table.add_row(
+        "Limite di durata",
+        f"{spec.execution_time_limit_seconds / 60:.0f} min "
+        f"(watchdog interno: {settings.max_run_seconds / 60:.0f} min)",
+    )
+    table.add_row("Se già in corso", "la nuova esecuzione non parte")
+    table.add_row("A batteria", "parte e prosegue comunque")
+    table.add_row("Dopo spegnimento", "recupera l'esecuzione persa, senza svegliare il PC")
+    table.add_row("Privilegi", "utente normale (nessun amministratore)")
+    table.add_row("Finestra", "nessuna: gira in sessione 0")
+    return table
+
+
+def _schedule_install(
+    args: argparse.Namespace, settings: Settings, console: Console, err_console: Console
+) -> int:
+    """Show exactly what would be registered, then register it — never silently."""
+    overrides: dict[str, object] = {}
+    if args.interval is not None:
+        overrides["scheduler_interval_minutes"] = args.interval
+    if args.random_delay is not None:
+        overrides["scheduler_random_delay_minutes"] = args.random_delay
+    if overrides:
+        try:
+            # Rivalidato dal modello: i limiti stanno in config.py, non qui.
+            settings = Settings.model_validate({**settings.model_dump(), **overrides})
+        except ValidationError as exc:
+            err_console.print(f"[red]Parametri non validi:[/red]\n{exc}")
+            return ExitCode.CONFIG
+
+    spec = TaskSpec.from_settings(
+        settings, project_dir=project_dir(), now=datetime.now(tz=UTC).astimezone()
+    )
+    if not spec.command.exists():
+        err_console.print(
+            f"[red]Errore:[/red] launcher non trovato: {spec.command}\n"
+            "Senza di esso il task non avrebbe niente da eseguire."
+        )
+        return ExitCode.CONFIG
+
+    xml = build_task_xml(spec)
+    console.print(_schedule_preview(spec, settings))
+    console.print("[dim]Definizione XML che verrebbe registrata:[/dim]")
+    console.print(Syntax(xml, "xml", theme="ansi_dark", background_color="default"))
+
+    if args.dry_run:
+        console.print(
+            "\n[yellow]--dry-run: niente è stato registrato.[/yellow] "
+            "Ripeti senza --dry-run per procedere."
+        )
+        return ExitCode.OK
+
+    if not args.assume_yes:
+        if not sys.stdin.isatty():
+            err_console.print(
+                "[red]Serve una conferma[/red] ma la sessione non è interattiva: "
+                "riesegui con --yes se sei sicuro."
+            )
+            return ExitCode.CONFIG
+        if input("Registrare questo task? [s/N] ").strip().lower() not in {"s", "si", "sì", "y"}:
+            console.print("Annullato: niente è stato registrato.")
+            return ExitCode.OK
+
+    install_task(spec)
+    console.print(
+        f"\n[green]Task registrato:[/green] {spec.task_name}\n"
+        f"Verifica con: vintedbot schedule status — oppure vintedbot doctor\n"
+        f"Rimuovi con:  vintedbot schedule uninstall"
+    )
+    return ExitCode.OK
+
+
+def _schedule_uninstall(settings: Settings, console: Console) -> int:
+    """Idempotent: nothing registered is a normal outcome, not an error."""
+    if uninstall_task(settings.scheduler_task_name):
+        console.print(f"[green]Task rimosso:[/green] {settings.scheduler_task_name}")
+    else:
+        console.print(
+            f"Nessun task da rimuovere: {settings.scheduler_task_name} non è registrato."
+        )
+    return ExitCode.OK
+
+
+def _schedule_status(settings: Settings, console: Console) -> int:
+    status = task_status(settings.scheduler_task_name)
+    console.print(_task_status_table(settings, status))
+    return ExitCode.OK
+
+
+def _task_status_table(settings: Settings, status: TaskStatus) -> Table:
+    table = Table(title="Schedulazione", show_header=False, box=box.SIMPLE)
+    table.add_column("Voce", style="bold")
+    table.add_column("Valore")
+    table.add_row("Nome", settings.scheduler_task_name)
+    if not status.registered:
+        table.add_row("Stato", "[yellow]non registrato[/yellow]")
+        table.add_row("", "Registralo con: vintedbot schedule install")
+        return table
+    table.add_row("Stato", status.state or "?")
+    table.add_row("Ultima esecuzione", status.last_run_time or "mai")
+    table.add_row("Ultimo risultato", _format_task_result(status))
+    table.add_row("Prossima esecuzione", status.next_run_time or "—")
+    return table
+
+
+def _format_task_result(status: TaskStatus) -> str:
+    if status.last_result is None:
+        return "—"
+    meaning = _TASK_RESULT_MEANING.get(status.last_result, "codice sconosciuto")
+    colour = "green" if status.last_result == 0 else "yellow"
+    return f"[{colour}]{status.last_result_hex}[/{colour}] — {meaning}"
+
+
+def _cmd_schedule(args: argparse.Namespace, console: Console, err_console: Console) -> int:
+    """Install, remove or inspect the Windows scheduled task."""
+    settings = get_settings()
+    try:
+        if args.schedule_action == "install":
+            return _schedule_install(args, settings, console, err_console)
+        if args.schedule_action == "uninstall":
+            return _schedule_uninstall(settings, console)
+        return _schedule_status(settings, console)
+    except SchedulerError as exc:
+        err_console.print(f"[red]Task Scheduler:[/red] {exc}")
+        return ExitCode.ERROR
+
+
+def _format_size(num_bytes: int) -> str:
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":  # noqa: PLR2004
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"  # pragma: no cover - irraggiungibile, il loop chiude prima
+
+
+def _doctor_database(settings: Settings) -> tuple[str, str]:
+    """Describe the database. Never migrates it, never creates it."""
+    path = settings.db_path
+    if not path.exists():
+        return (f"{path}\nassente: verrà creato alla prima esecuzione", "attenzione")
+    size = _format_size(path.stat().st_size)
+    try:
+        # sqlite3.connect diretto, NON db.get_connection: `doctor` deve
+        # fotografare lo stato, non applicare migrazioni di nascosto.
+        with closing(sqlite3.connect(path)) as conn:
+            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            counts = {
+                table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])  # noqa: S608
+                for table in _COUNTED_TABLES
+            }
+    except sqlite3.Error as exc:
+        return (f"{path}\n[red]illeggibile o danneggiato[/red]: {exc}", "errore")
+    detail = " · ".join(f"{table} {count}" for table, count in counts.items())
+    return (f"{path}\n{size} · schema v{version} · {detail}", "ok")
+
+
+def _doctor_logs(settings: Settings) -> tuple[str, str]:
+    log_file = settings.log_dir / LOG_FILENAME
+    if not log_file.exists():
+        return (f"{log_file}\nnessun log ancora scritto", "attenzione")
+    archived = len(list(settings.log_dir.glob(f"{LOG_FILENAME}.*")))
+    size = _format_size(log_file.stat().st_size)
+    suffix = f" (+{archived} archiviati)" if archived else ""
+    return (f"{log_file}\n{size}{suffix}", "ok")
+
+
+def _doctor_lock(settings: Settings) -> tuple[str, str]:
+    status = probe_lock(settings.lock_path)
+    if not status.held:
+        return ("libero", "ok")
+    pid = status.holder.get("pid", "?")
+    since = status.holder.get("started_at", "?")
+    return (f"tenuto dal pid {pid}, dalle {since}", "ok")
+
+
+def _doctor_last_run(settings: Settings) -> tuple[str, str]:
+    """Read the last run from health.json — authoritative, unlike the log text."""
+    state = HealthState.load(settings.health_path)
+    if not state.last_run:
+        return ("nessuna esecuzione registrata", "attenzione")
+    last = state.last_run
+    finished = str(last.get("finished_at", "?"))
+    try:
+        when = datetime.fromisoformat(finished).astimezone()
+        stamp = f"{when:%Y-%m-%d %H:%M} ({_relative_time(when, datetime.now(tz=UTC))})"
+    except ValueError:
+        stamp = finished
+    outcome = str(last.get("outcome", "?"))
+    parts = [
+        f"esito {outcome}",
+        f"exit {last.get('exit_code', '?')}",
+        f"{last.get('duration_seconds', '?')}s",
+        f"avvio {last.get('trigger', '?')}",
+    ]
+    if "notified" in last:
+        parts.append(f"{last['notified']} notificati")
+    status = "ok" if outcome == "ok" else "attenzione"
+    details = " · ".join(parts)
+    return (f"{stamp}\n{details}", status)
+
+
+def _doctor_searches(settings: Settings) -> tuple[str, str]:
+    try:
+        searches = load_searches(settings.searches_path)
+    except SearchConfigError as exc:
+        return (f"[red]{exc}[/red]", "errore")
+    enabled = [search.name for search in searches if search.enabled]
+    if not enabled:
+        return (f"{settings.searches_path}\nnessuna ricerca attiva", "attenzione")
+    return (f"{settings.searches_path}\n{len(enabled)} attive: {', '.join(enabled)}", "ok")
+
+
+def _doctor_credentials(settings: Settings) -> tuple[str, str]:
+    """Presence only — the values themselves must never reach the screen."""
+    missing = []
+    if settings.telegram_bot_token is None:
+        missing.append("token")
+    if not settings.telegram_chat_id:
+        missing.append("chat id")
+    if missing:
+        return (f"mancano: {', '.join(missing)} — le notifiche non partiranno", "attenzione")
+    return ("token e chat id configurati", "ok")
+
+
+def _doctor_schedule(settings: Settings) -> tuple[str, str]:
+    try:
+        status = task_status(settings.scheduler_task_name)
+    except SchedulerError as exc:
+        return (f"{settings.scheduler_task_name}\nnon interrogabile: {exc}", "attenzione")
+    if not status.registered:
+        return (
+            f"{settings.scheduler_task_name}\nnon registrato "
+            "— attivalo con: vintedbot schedule install",
+            "attenzione",
+        )
+    detail = (
+        f"stato {status.state} · ultima {status.last_run_time or 'mai'} "
+        f"· risultato {_format_task_result(status)} "
+        f"· prossima {status.next_run_time or '—'}"
+    )
+    return (f"{settings.scheduler_task_name}\n{detail}", "ok")
+
+
+_DOCTOR_MARK = {
+    "ok": "[green]ok[/green]",
+    "attenzione": "[yellow]attenzione[/yellow]",
+    "errore": "[red]errore[/red]",
+}
+
+
+def _cmd_doctor(args: argparse.Namespace, console: Console, err_console: Console) -> int:
+    """One screen answering "is the bot alive?" — and never crashing while doing it."""
+    del args, err_console
+    settings = get_settings()
+
+    checks: list[tuple[str, tuple[str, str]]] = [
+        ("Cartella dati", (str(settings.data_dir), "ok")),
+        ("Database", _doctor_database(settings)),
+        ("Log", _doctor_logs(settings)),
+        ("Lock", _doctor_lock(settings)),
+        ("Ultima esecuzione", _doctor_last_run(settings)),
+        ("Schedulazione", _doctor_schedule(settings)),
+        ("Ricerche salvate", _doctor_searches(settings)),
+        ("Credenziali Telegram", _doctor_credentials(settings)),
+    ]
+
+    table = Table(title="VintedBot — diagnosi", box=box.SIMPLE)
+    table.add_column("Controllo", style="bold", no_wrap=True)
+    table.add_column("Valore")
+    table.add_column("Esito", no_wrap=True)
+    for label, (value, status) in checks:
+        table.add_row(label, value, _DOCTOR_MARK[status])
+    console.print(table)
+
+    marker = cloud_sync_marker(settings.db_path)
+    if marker is not None:
+        console.print(f"[yellow]I dati sono in una cartella sincronizzata ({marker}).[/yellow]")
+
+    # Solo un guasto vero (database illeggibile, ricerche invalide) merita
+    # un exit code diverso da zero: gli "attenzione" sono cose da fare, non rotture.
+    broken = [label for label, (_, status) in checks if status == "errore"]
+    if broken:
+        console.print(f"[red]Da sistemare:[/red] {', '.join(broken)}")
+        return ExitCode.ERROR
+    return ExitCode.OK
+
+
 def _warn_if_cloud_synced(settings: Settings, err_console: Console) -> None:
     """Nag (once per run) when the database lives in a synced folder."""
     marker = cloud_sync_marker(settings.db_path)
@@ -924,6 +1321,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_stats(args, console, err_console)
     if args.command == "migrate-data":
         return _cmd_migrate_data(args, console, err_console)
+    if args.command == "schedule":
+        return _cmd_schedule(args, console, err_console)
+    if args.command == "doctor":
+        return _cmd_doctor(args, console, err_console)
     raise AssertionError("unreachable: argparse enforces a valid subcommand")
 
 

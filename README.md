@@ -8,6 +8,11 @@ sottoprezzati rispetto ad annunci comparabili.
 > (vedi [docs/api_notes.md](docs/api_notes.md)). Uso personale, volumi bassi,
 > rate limiting prudente.
 
+> 📖 **Guida passo passo**: [docs/manuale.html](docs/manuale.html) — dal
+> primo `uv sync` al bot che gira da solo, con tabelle di riferimento e
+> risoluzione dei problemi. Aprila nel browser. Questo README resta il
+> riferimento tecnico dettagliato.
+
 ## Requisiti
 
 - Python ≥ 3.12
@@ -361,15 +366,89 @@ si tenta di notificarlo via Telegram: resta nel log. Lo stato sta in
 importanti da segnalare sono proprio quelli in cui il DB è bloccato o
 corrotto, e un registro che dipende dal DB sarebbe muto lì.
 
-### Exit code (li leggerà lo scheduler)
+### Exit code (li legge lo scheduler)
 
-| Codice | Significato |
-|---|---|
-| `0` | successo, anche con zero risultati |
-| `1` | errore generico durante l'esecuzione |
-| `2` | configurazione invalida (`searches.toml`, credenziali, `.env`) |
-| `3` | un'altra istanza è già in esecuzione — **non è un guasto** |
-| `4` | watchdog: durata massima superata |
+Il Task Scheduler mostra l'ultimo exit code nella colonna **"Ultimo
+risultato esecuzione"**, in esadecimale.
+
+| Codice | Nella GUI | Significato |
+|---|---|---|
+| `0` | `0x0` | successo, anche con zero risultati |
+| `1` | `0x1` | errore generico durante l'esecuzione |
+| `2` | `0x2` | configurazione invalida (`searches.toml`, credenziali, `.env`, `.venv`) |
+| `3` | `0x3` | un'altra istanza è già in esecuzione — **non è un guasto**, nessuna notifica |
+| `4` | `0x4` | watchdog: durata massima superata |
+
+Un `0x41301` non è nostro: è il Task Scheduler che dice "in esecuzione
+adesso". `0x41303` significa "mai eseguito".
+
+## Esecuzione automatica (Task Scheduler)
+
+```bash
+uv run vintedbot schedule install --dry-run   # mostra tutto, non tocca nulla
+uv run vintedbot schedule install             # chiede conferma, poi registra
+uv run vintedbot schedule status              # stato, ultimo risultato, prossima partenza
+uv run vintedbot schedule uninstall           # rimuove task e cartella
+```
+
+Il task esegue `scripts/run-all.cmd`, che fa il preflight (`.venv`,
+`.env`), esporta `VINTEDBOT_INVOKED_BY=scheduler` e propaga intatto
+l'exit code di Python. Ogni percorso è assoluto, derivato da `%~dp0`: la
+directory corrente sotto lo scheduler è `C:\Windows\system32`, non quella
+del progetto.
+
+### Le scelte, e perché
+
+**Ogni 10 minuti, con un ritardo casuale fino a 3.** La ricerca fa due
+richieste per giro (homepage per i cookie + una pagina da 96 risultati):
+con un filtro di nicchia non si perdono annunci nemmeno a intervalli
+lunghi, quello che cambia è *quanto tardi lo si viene a sapere*. Il
+ritardo casuale esiste perché un polling perfettamente regolare è il
+segnale più riconoscibile che un bot possa emettere. Si cambia da `.env`
+(`VINTEDBOT_SCHEDULER_INTERVAL_MINUTES`) o al volo con `--interval`.
+
+**24 ore su 24.** Di notte c'è meno concorrenza sugli affari, ed è
+proprio quando conviene esserci. Se il telefono deve stare zitto, si
+silenzia la chat da Telegram: meglio che rinunciare a cercare.
+
+**`LogonType S4U`.** Gira anche a PC bloccato o con l'utente non
+connesso, **senza salvare la password di Windows** da nessuna parte. Il
+prezzo è che le unità di rete mappate non sono disponibili — a noi non
+servono, tutto è su percorso locale assoluto. È anche il motivo per cui
+non compare nessuna finestra: senza sessione interattiva il processo gira
+in sessione 0, dove una finestra non può esistere. `<Hidden>` è la
+seconda cintura, non il meccanismo.
+
+**Doppia protezione sulle sovrapposizioni.** Il task è registrato con
+`MultipleInstancesPolicy = IgnoreNew`, e comunque il lock farebbe uscire
+il secondo processo con codice 3.
+
+**Limite di durata = watchdog × 1.5.** Il kill dello scheduler è la rete
+*esterna*: deve intervenire solo se il nostro watchdog non ce l'ha fatta,
+mai prima, altrimenti l'uscita pulita con codice 4 non avverrebbe mai.
+
+**Recupero sì, risveglio no.** `StartWhenAvailable` recupera l'esecuzione
+saltata mentre il PC era spento o sospeso; `WakeToRun` resta `false`. A
+batteria il task parte e prosegue: è un portatile.
+
+### Verificare che stia funzionando
+
+```bash
+uv run vintedbot doctor
+```
+
+Una schermata sola: cartella dati e dimensione del DB, file di log, stato
+del lock, **ultima esecuzione con esito ed exit code**, stato del task
+schedulato, ricerche attive, presenza delle credenziali (mai i valori).
+Regge un database assente o corrotto e un Task Scheduler che non
+risponde: lo dice, non esplode. Esce con `1` solo se c'è un guasto vero.
+
+L'ultima esecuzione viene letta da `<data dir>/health.json`, non dai log:
+il testo dei log è pensato per gli umani e cambia forma con
+`VINTEDBOT_LOG_JSON`, mentre quel file è già quello progettato per
+sopravvivere ai guai del database. Nei log ogni riga porta
+`trigger=scheduler` o `trigger=manual`, così si distingue a colpo d'occhio
+un giro automatico da uno lanciato a mano.
 
 ## Come funziona il tracking dei doppioni
 
@@ -431,13 +510,16 @@ src/vintedbot/     codice applicativo (tipizzato, py.typed)
   searches.py      caricamento/validazione di searches.toml
   paths.py         data dir per piattaforma, rilevamento cartelle sincronizzate
   lock.py          lock singola istanza (OS-level, crash-safe)
-  health.py        notifica guasti con cooldown + messaggio di ripresa
+  health.py        notifica guasti con cooldown, ripresa, esito ultimo run
+  schedule.py      Task Scheduler: XML del task, install/uninstall/status
   notifier.py      TelegramNotifier (API Bot HTTP, retry, token mai nei log)
   formatting.py    caption HTML per gli item (escaping, limite 1024)
   cli.py           CLI argparse + tabella rich (unico layer con print)
   __main__.py      python -m vintedbot
+scripts/run-all.cmd  launcher invocato dal Task Scheduler (preflight + exit code)
 tests/             test pytest (+ fixtures/ con risposta API reale)
 docs/api_notes.md  reverse engineering dell'endpoint di ricerca Vinted
+docs/manuale.html  guida passo passo per l'uso quotidiano
 ```
 
 ## Stato
@@ -462,4 +544,4 @@ docs/api_notes.md  reverse engineering dell'endpoint di ricerca Vinted
 - [x] 4.3 Collaudo reale end-to-end del filtro affare — 2026-08-23
 - [x] 5.1 Ricerche salvate (`searches.toml`) e comando `run-all`
 - [x] 5.2 Esecuzione non presidiata: data dir, lock, watchdog, log su file, notifica guasti
-- [ ] 5.3 Task Scheduler di Windows
+- [x] 5.3 Task Scheduler di Windows (`schedule.py`, `scripts/run-all.cmd`, `doctor`)

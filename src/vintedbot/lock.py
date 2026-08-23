@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Self
 
@@ -70,6 +71,50 @@ else:  # pragma: no cover - the project targets Windows; POSIX kept working
 
     def _unlock(fd: int) -> None:
         fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+@dataclass(frozen=True)
+class LockStatus:
+    """Whether the lock is currently held, and by whom."""
+
+    held: bool
+    holder: dict[str, object]
+
+
+def probe_lock(path: Path) -> LockStatus:
+    """Report the lock state WITHOUT disturbing it.
+
+    ``doctor`` must not answer "is anyone running?" by acquiring the lock:
+    acquiring it rewrites the diagnostic payload with the prober's own PID
+    and would leave a lie behind. So this takes the lock only long enough
+    to learn that it was free, never writes, and never creates the file.
+    """
+    if not path.exists():
+        return LockStatus(held=False, holder={})
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except OSError:
+        # Unreadable for reasons of its own: report as free rather than
+        # inventing a holder — the run itself will fail loudly if it matters.
+        return LockStatus(held=False, holder={})
+    try:
+        _try_lock(fd)
+    except OSError:
+        return LockStatus(held=True, holder=_read_holder(path))
+    else:
+        _unlock(fd)
+        return LockStatus(held=False, holder={})
+    finally:
+        os.close(fd)
+
+
+def _read_holder(path: Path) -> dict[str, object]:
+    """Best-effort diagnostics from the readable head of the lock file."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 class SingleInstanceLock:
@@ -137,9 +182,4 @@ class SingleInstanceLock:
             logger.debug("lock_diagnostics_write_failed", path=str(self._path))
 
     def _read_holder(self) -> dict[str, object]:
-        try:
-            raw = self._path.read_text(encoding="utf-8")
-            data = json.loads(raw)
-        except (OSError, ValueError):
-            return {}
-        return data if isinstance(data, dict) else {}
+        return _read_holder(self._path)

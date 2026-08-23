@@ -16,6 +16,7 @@ import vintedbot.health
 from vintedbot.cli import ExitCode, main
 from vintedbot.config import Settings
 from vintedbot.db import get_connection
+from vintedbot.health import HealthState
 from vintedbot.lock import SingleInstanceLock
 from vintedbot.models import Item
 
@@ -319,3 +320,59 @@ def test_no_warning_outside_synced_folders(
 ) -> None:
     main(["run-all", "--searches", str(searches_file)])
     assert "cartella sincronizzata" not in capsys.readouterr().err
+
+
+# ------------------------------------- (h) provenienza e traccia dell'ultimo run
+
+
+def read_last_run(settings: Settings) -> dict[str, object]:
+    return HealthState.load(settings.health_path).last_run
+
+
+def test_run_records_its_outcome_for_doctor(
+    searches_file: Path, settings: Settings
+) -> None:
+    assert main(["run-all", "--searches", str(searches_file)]) == ExitCode.OK
+
+    last = read_last_run(settings)
+    assert last["outcome"] == "ok"
+    assert last["exit_code"] == 0
+    assert last["trigger"] == "manual"
+    assert last["notified"] == 2
+    assert last["finished_at"]
+
+
+def test_scheduler_runs_are_distinguishable_from_manual_ones(
+    monkeypatch: pytest.MonkeyPatch, searches_file: Path, settings: Settings
+) -> None:
+    monkeypatch.setenv("VINTEDBOT_INVOKED_BY", "scheduler")
+
+    assert main(["run-all", "--searches", str(searches_file)]) == ExitCode.OK
+
+    assert read_last_run(settings)["trigger"] == "scheduler"
+
+
+def test_timeout_is_recorded_with_its_exit_code(
+    monkeypatch: pytest.MonkeyPatch, searches_file: Path, settings: Settings
+) -> None:
+    monkeypatch.setattr(settings, "max_run_seconds", 0.05)
+    FakeClient.delay = 0.2
+
+    assert main(["run-all", "--searches", str(searches_file)]) == ExitCode.TIMEOUT
+
+    last = read_last_run(settings)
+    assert last["outcome"] == "timeout"
+    assert last["exit_code"] == 4
+
+
+def test_a_skipped_run_is_not_recorded_as_a_run(
+    searches_file: Path, settings: Settings
+) -> None:
+    """Exit 3 means "nothing happened": it must not overwrite the last real run."""
+    assert main(["run-all", "--searches", str(searches_file)]) == ExitCode.OK
+    genuine = read_last_run(settings)
+
+    with SingleInstanceLock(settings.lock_path):
+        assert main(["run-all", "--searches", str(searches_file)]) == ExitCode.LOCKED
+
+    assert read_last_run(settings) == genuine

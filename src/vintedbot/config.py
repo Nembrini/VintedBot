@@ -87,6 +87,29 @@ class Settings(BaseSettings):
         le=720,
         description="Minimum delay before re-notifying the SAME failure signature.",
     )
+    scheduler_task_name: str = Field(
+        default="\\VintedBot\\run-all",
+        min_length=1,
+        description=(
+            "Full Task Scheduler name, folder included. The folder keeps the "
+            "task library tidy and makes uninstalling a single operation."
+        ),
+    )
+    scheduler_interval_minutes: int = Field(
+        default=10,
+        ge=1,
+        le=1440,
+        description="How often the scheduler starts `run-all`.",
+    )
+    scheduler_random_delay_minutes: int = Field(
+        default=3,
+        ge=0,
+        le=60,
+        description=(
+            "Random extra delay added to each firing. A perfectly regular "
+            "poll is the most bot-like signal we could emit; this smears it."
+        ),
+    )
     search_max_pages: int = Field(
         default=5,
         ge=1,
