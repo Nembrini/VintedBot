@@ -10,7 +10,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, HttpUrl, field_validator
+from pydantic import AliasChoices, Field, HttpUrl, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
@@ -63,6 +63,58 @@ class Settings(BaseSettings):
         ge=1,
         le=2000,
         description="Default item cap for a paginated search.",
+    )
+    pricing_min_sample_size: int = Field(
+        default=8,
+        ge=1,
+        le=1000,
+        description="Below this many deduped observations the score is None (unknown).",
+    )
+    pricing_max_discount: float = Field(
+        default=0.60,
+        gt=0,
+        le=1,
+        description="Discount vs median that maps to the top of the score curve.",
+    )
+    pricing_confidence_k: int = Field(
+        default=10,
+        ge=0,
+        le=1000,
+        description="Shrinkage constant: confidence = n / (n + k).",
+    )
+    pricing_max_age_days: int = Field(
+        default=90,
+        ge=1,
+        le=3650,
+        description="Observation window for the market estimate.",
+    )
+    max_notifications_per_run: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description=(
+            "Anti-flood cap: max Telegram notifications per run. Items beyond "
+            "the cap stay unnotified and are drained on later runs."
+        ),
+    )
+    notify_pause_seconds: float = Field(
+        default=1.0,
+        ge=0,
+        le=30,
+        description="Pause between two Telegram sends (stay clear of API limits).",
+    )
+    telegram_bot_token: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("VINTEDBOT_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"),
+        description=(
+            "Telegram bot token (from @BotFather). Optional at type level: the "
+            "search CLI works without it; the notifier validates presence at use."
+        ),
+    )
+    telegram_chat_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("VINTEDBOT_TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID"),
+        description="Chat that receives the notifications.",
     )
     log_level: LogLevel = Field(
         default="INFO",

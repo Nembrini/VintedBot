@@ -49,6 +49,49 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         """,
         "CREATE INDEX idx_seen_items_first_seen_at ON seen_items (first_seen_at)",
     ),
+    # v2 — campi necessari a ricostruire un Item notificabile dal DB
+    # (retry degli invii falliti, step 3.3). Nullable: le righe v1
+    # restano valide e producono notifiche solo-testo.
+    (
+        "ALTER TABLE seen_items ADD COLUMN size TEXT",
+        "ALTER TABLE seen_items ADD COLUMN condition TEXT",
+        "ALTER TABLE seen_items ADD COLUMN photo_url TEXT",
+    ),
+    # v3 — album di foto (JSON array di URL) e data di pubblicazione,
+    # per notifiche complete anche quando l'item è ricostruito dal DB.
+    (
+        "ALTER TABLE seen_items ADD COLUMN photo_urls TEXT",
+        "ALTER TABLE seen_items ADD COLUMN published_at TEXT",
+    ),
+    # v4 — storico dei prezzi osservati (step 4.1): una riga per item per
+    # esecuzione, anche per item già visti — i ribassi sono informazione.
+    (
+        """
+        CREATE TABLE price_observations (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id     INTEGER NOT NULL,
+            brand       TEXT,                 -- normalizzato: trim + lowercase
+            catalog_id  INTEGER,              -- categoria della RICERCA (se univoca)
+            size        TEXT,
+            condition   TEXT,
+            price       TEXT NOT NULL,        -- Decimal come stringa: mai float
+            currency    TEXT NOT NULL,
+            observed_at TEXT NOT NULL         -- UTC, ISO-8601
+        )
+        """,
+        # chiave di raggruppamento del motore di stima (4.2)
+        "CREATE INDEX idx_price_obs_brand_catalog"
+        " ON price_observations (brand, catalog_id)",
+        # pulizia periodica
+        "CREATE INDEX idx_price_obs_observed_at ON price_observations (observed_at)",
+    ),
+    # v5 — decisioni del filtro affare (step 4.2): score assegnato al
+    # momento del mark_seen (snapshot informativo) e skipped_at per gli
+    # annunci scartati DEFINITIVAMENTE perché sotto soglia.
+    (
+        "ALTER TABLE seen_items ADD COLUMN score INTEGER",
+        "ALTER TABLE seen_items ADD COLUMN skipped_at TEXT",
+    ),
 )
 
 

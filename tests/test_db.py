@@ -24,6 +24,13 @@ EXPECTED_COLUMNS = {
     "price",
     "currency",
     "brand",
+    "size",        # v2
+    "condition",   # v2
+    "photo_url",   # v2
+    "photo_urls",    # v3
+    "published_at",  # v3
+    "score",         # v5
+    "skipped_at",    # v5
     "url",
     "first_seen_at",
     "notified_at",
@@ -110,6 +117,34 @@ def test_journal_mode_is_wal(tmp_path: Path) -> None:
         assert journal_mode == "wal"
         foreign_keys = conn.execute("PRAGMA foreign_keys").fetchone()[0]
         assert foreign_keys == 1
+
+
+# ------------------------------ upgrade da v1: nessun dato perso
+
+
+def test_v1_database_upgrades_without_losing_data(tmp_path: Path) -> None:
+    db_path = tmp_path / "vintedbot.db"
+
+    # Costruisci a mano un DB fermo alla v1, con un dato dentro.
+    with closing(sqlite3.connect(db_path)) as raw:
+        for statement in MIGRATIONS[0]:
+            raw.execute(statement)
+        raw.execute("PRAGMA user_version = 1")
+        raw.execute(
+            "INSERT INTO seen_items"
+            " (item_id, title, price, currency, url, first_seen_at)"
+            " VALUES (1, 'vecchio', '9.99', 'EUR', 'https://x/1', '2026-01-01T00:00:00+00:00')"
+        )
+        raw.commit()
+
+    with closing(get_connection(db_path)) as conn:
+        assert _user_version(conn) == len(MIGRATIONS)  # arrivato all'ultima
+        row = conn.execute("SELECT * FROM seen_items WHERE item_id = 1").fetchone()
+        assert row["title"] == "vecchio"          # dato sopravvissuto
+        assert row["photo_urls"] is None          # colonne v2/v3 presenti, NULL
+        assert row["score"] is None and row["skipped_at"] is None  # v5 presenti, NULL
+        # tabella v4 creata e funzionante
+        assert conn.execute("SELECT COUNT(*) FROM price_observations").fetchone()[0] == 0
 
 
 # ------------------------------------------------- downgrade: rifiutato

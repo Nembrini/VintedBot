@@ -154,7 +154,19 @@ class Item(BaseModel):
         validation_alias=AliasPath("photo", "url"),
         description="Main photo (~800px).",
     )
-    seller: Seller = Field(validation_alias="user")
+    photo_urls: tuple[str, ...] = Field(
+        default=(),
+        validation_alias="photos",
+        description="All photo URLs, main first (for Telegram albums).",
+    )
+    seller: Seller | None = Field(
+        default=None,
+        validation_alias="user",
+        description=(
+            "Present when parsed from the API; None for items rebuilt from "
+            "the local DB (not persisted — not needed for notifications)."
+        ),
+    )
     published_at: datetime | None = Field(
         default=None,
         validation_alias=AliasPath("photo", "high_resolution", "timestamp"),
@@ -169,6 +181,20 @@ class Item(BaseModel):
     def _blank_to_none(cls, v: object) -> object:
         """The API uses empty strings for missing brand/size; normalize to None."""
         return v if v != "" else None
+
+    @field_validator("photo_urls", mode="before")
+    @classmethod
+    def _extract_photo_urls(cls, v: object) -> object:
+        """Accept both the API's photos[] (objects with url) and plain URL lists."""
+        if isinstance(v, list | tuple):
+            urls: list[str] = []
+            for photo in v:
+                if isinstance(photo, str):
+                    urls.append(photo)
+                elif isinstance(photo, dict) and isinstance(photo.get("url"), str):
+                    urls.append(photo["url"])
+            return tuple(urls)
+        return v
 
 
 def parse_items(raw_items: Iterable[Any]) -> list[Item]:
