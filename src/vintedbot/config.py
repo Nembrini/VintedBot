@@ -10,8 +10,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AliasChoices, Field, HttpUrl, SecretStr, field_validator
+from pydantic import AliasChoices, Field, HttpUrl, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from vintedbot.paths import default_data_dir
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
@@ -48,9 +50,42 @@ class Settings(BaseSettings):
         le=60,
         description="Connect timeout for HTTP calls (seconds).",
     )
+    data_dir: Path = Field(
+        default_factory=default_data_dir,
+        description=(
+            "Directory for database, logs and lock file. Defaults to the "
+            "per-user data dir, deliberately OUTSIDE cloud-synced folders."
+        ),
+    )
     db_path: Path = Field(
-        default=Path("data/vintedbot.db"),
-        description="SQLite database file; parent directory is created on first open.",
+        default_factory=lambda: default_data_dir() / "vintedbot.db",
+        description=(
+            "SQLite database file; follows data_dir unless set explicitly. "
+            "Parent directory is created on first open."
+        ),
+    )
+    max_run_seconds: float = Field(
+        default=600.0,
+        gt=0,
+        le=86400,
+        description="Watchdog: hard deadline for one `run-all` execution.",
+    )
+    log_max_bytes: int = Field(
+        default=5 * 1024 * 1024,
+        ge=1024,
+        description="Rotate the log file once it reaches this size.",
+    )
+    log_backup_count: int = Field(
+        default=5,
+        ge=0,
+        le=50,
+        description="How many rotated log files to keep.",
+    )
+    error_notify_cooldown_hours: float = Field(
+        default=6.0,
+        ge=0,
+        le=720,
+        description="Minimum delay before re-notifying the SAME failure signature.",
     )
     search_max_pages: int = Field(
         default=5,
@@ -63,6 +98,16 @@ class Settings(BaseSettings):
         ge=1,
         le=2000,
         description="Default item cap for a paginated search.",
+    )
+    searches_path: Path = Field(
+        default=Path("searches.toml"),
+        description="TOML file holding the saved searches executed by `run-all`.",
+    )
+    delay_between_searches_seconds: float = Field(
+        default=5.0,
+        ge=0,
+        le=300,
+        description="Pause between two saved searches in a `run-all` execution.",
     )
     pricing_min_sample_size: int = Field(
         default=8,
@@ -129,6 +174,38 @@ class Settings(BaseSettings):
     @classmethod
     def _uppercase_level(cls, v: object) -> object:
         return v.upper() if isinstance(v, str) else v
+
+    @model_validator(mode="after")
+    def _db_path_follows_data_dir(self) -> Settings:
+        """Keep the DB inside data_dir unless the user pinned db_path itself."""
+        if "db_path" not in self.model_fields_set:
+            self.db_path = self.data_dir / "vintedbot.db"
+        return self
+
+    @property
+    def log_dir(self) -> Path:
+        """Directory holding the rotating log files."""
+        return self.data_dir / "logs"
+
+    @property
+    def lock_path(self) -> Path:
+        """Single-instance lock file for `run-all`."""
+        return self.data_dir / "vintedbot.lock"
+
+    @property
+    def health_path(self) -> Path:
+        """Failure-tracking state (JSON, deliberately not in the DB)."""
+        return self.data_dir / "health.json"
+
+    def secret_values(self) -> tuple[str, ...]:
+        """Strings that must never reach a log line (see log.mask_secrets)."""
+        secrets: list[str] = []
+        if self.telegram_bot_token is not None:
+            secrets.append(self.telegram_bot_token.get_secret_value())
+        # Short ids are skipped: masking "42" everywhere would mangle logs.
+        if self.telegram_chat_id and len(self.telegram_chat_id) >= 5:
+            secrets.append(self.telegram_chat_id)
+        return tuple(secrets)
 
 
 @lru_cache(maxsize=1)

@@ -1,5 +1,6 @@
 # Secrets / local config
 .env
+searches.toml
 
 # Python
 __pycache__/

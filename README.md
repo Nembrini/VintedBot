@@ -192,6 +192,185 @@ notifica arriva comunque.
 5. Run 3 a coda vuota: "Nessun nuovo annuncio", zero notifiche, exit 0.
 6. Run 4 `--no-notify`: zero messaggi Telegram.
 
+## Ricerche salvate e `run-all`
+
+`search` resta il comando per le **prove manuali**; la modalità di
+**produzione** (quella che lancerà lo scheduler) è `run-all`, che esegue
+in sequenza le ricerche salvate in `searches.toml`:
+
+```bash
+uv run vintedbot run-all
+```
+
+### Eseguire solo alcune ricerche
+
+Tre modi, dal più temporaneo al più stabile:
+
+```bash
+# 1. una sola ricerca, al volo
+uv run vintedbot run-all --only cavalli-jeans
+
+# 2. un paio di ricerche: --only è RIPETIBILE, una volta per nome
+uv run vintedbot run-all --only cavalli-jeans --only giubbotti-m
+
+# 3. provarle senza notificare né sporcare il DB
+uv run vintedbot run-all --only cavalli-jeans --dry-run
+```
+
+- I nomi sono quelli del campo `name` in `searches.toml`.
+- L'ordine di esecuzione è sempre **quello del file**, non quello in cui
+  scrivi i `--only`.
+- `--only` esegue la ricerca **anche se `enabled = false`**: è una scelta
+  esplicita, utile per riattivarne una al volo senza toccare il file.
+- Se sbagli un nome il comando si ferma prima di toccare la rete e ti
+  elenca i nomi disponibili — nessuna ricerca viene eseguita, nemmeno
+  quelle scritte correttamente.
+
+Per escludere stabilmente una ricerca invece che selezionarla ogni volta,
+mettile `enabled = false` nel file: `run-all` senza `--only` esegue tutte
+e sole quelle abilitate.
+
+Altre opzioni:
+
+```bash
+uv run vintedbot run-all --dry-run                # niente notifiche né seen_items
+uv run vintedbot run-all --searches altro.toml    # file alternativo
+```
+
+Copia [searches.example.toml](searches.example.toml) in `searches.toml`
+(non versionato: contiene le tue ricerche) e adattalo:
+
+```toml
+[[search]]
+name = "cavalli-jeans"          # identificativo univoco, compare nei log
+enabled = true
+catalog = 257                   # ID Vinted, non nomi (vedi docs/api_notes.md)
+brand = [1965, 20117]           # un ID o una lista
+size = [208, 209, 210]
+max_price = 100
+max_pages = 1
+min_score = 60                  # assente = filtro affare OFF
+strict_score = false
+```
+
+I campi hanno **gli stessi nomi e lo stesso significato** delle opzioni di
+`search`. La validazione è severa e avviene prima di toccare la rete: un
+campo sconosciuto (`min_scor`), un nome duplicato, `min_score` fuori da
+0-100 o zero ricerche abilitate sono errori con messaggio esplicito, mai
+un traceback.
+
+**Semantica da conoscere:**
+
+- `enabled = false` mette in pausa una ricerca; `--only NOME` la esegue
+  comunque (vedi sopra).
+- `--dry-run` mostra tabelle e punteggi, registra le **osservazioni
+  prezzo**, ma non notifica e non scrive su `seen_items` (come `--all`).
+- **Dedup globale**: `seen_items` è per `item_id`, non per ricerca. Un
+  annuncio che compare in due ricerche viene notificato **una volta
+  sola**, dalla prima che lo incontra.
+- **Anti-valanga sull'intera esecuzione**: `MAX_NOTIFICATIONS_PER_RUN`
+  vale per tutto `run-all`, non per singola ricerca — 5 ricerche non
+  fanno 5 volte il limite. Il resto resta in coda per i giri successivi.
+- Fra una ricerca e l'altra c'è una pausa
+  (`VINTEDBOT_DELAY_BETWEEN_SEARCHES_SECONDS`, default 5s) che si somma
+  al rate limiting del client.
+- Una ricerca che fallisce (rete, parsing…) **non ferma le altre**: viene
+  segnalata nel riepilogo finale. Fa eccezione un errore definitivo di
+  configurazione Telegram (token invalido, chat inesistente), che
+  interrompe tutto.
+- **Exit code**: 0 se tutte le ricerche sono andate a buon fine (anche
+  con zero risultati), diverso da 0 se almeno una è fallita o se la
+  configurazione è invalida.
+
+## Esecuzione non presidiata
+
+`run-all` è pensato per girare ogni pochi minuti senza nessuno che
+guardi. Tre meccanismi lo rendono sicuro.
+
+### Dove vivono i dati (fuori dalle cartelle sincronizzate)
+
+Database, log, lock e stato di salute stanno tutti nella **data dir**:
+per default `%LOCALAPPDATA%\VintedBot` su Windows,
+`~/.local/share/vintedbot` altrove, sovrascrivibile con
+`VINTEDBOT_DATA_DIR` (usa sempre un percorso **assoluto**: sotto Task
+Scheduler la cartella corrente non è quella del progetto).
+
+Non è pignoleria: OneDrive & co. ricaricano il `.db` a ogni scrittura e
+possono tenerlo aperto durante l'upload → errori `database is locked`
+intermittenti e rischio concreto di perdere il file `-wal`. Se il DB
+finisce sotto una cartella sincronizzata il bot lo dice a ogni avvio.
+Per spostare un database esistente **senza perdere dati**:
+
+```bash
+uv run vintedbot migrate-data --to C:\percorso\nuovo
+```
+
+Usa `Connection.backup()` di SQLite, non una copia di file: con il WAL
+attivo copiare il solo `.db` perderebbe le transazioni ancora nel
+sidecar. Verifica i conteggi prima/dopo, stampa cosa mettere nel `.env`
+e lascia l'originale al suo posto — lo cancelli tu a verifica fatta.
+
+### Una sola istanza alla volta
+
+Il lock è un **lock di sistema su un file handle aperto**, non la
+semplice presenza di un file: se il processo va in crash o viene ucciso,
+l'OS chiude l'handle e il lock sparisce con lui. Un lock orfano che
+blocca il bot per sempre non può esistere. Il file contiene PID e ora di
+avvio del detentore, leggibili dall'esterno per diagnostica.
+
+Se un'istanza è già in corso la seconda esce con **codice 3** senza fare
+nulla e senza notifiche: è l'esito normale quando lo scheduler parte
+mentre il giro precedente non è finito. `--ignore-lock` forza
+l'esecuzione ed esiste **solo per debug** (due run in parallelo possono
+duplicare notifiche).
+
+### Watchdog
+
+`VINTEDBOT_MAX_RUN_SECONDS` (default 600) è la durata massima di un run.
+Superata, l'esecuzione si ferma in modo pulito — tra una ricerca e
+l'altra, o a un punto di attesa, mai dentro una transazione — logga
+quali ricerche sono rimaste fuori ed esce con **codice 4**. Serve a
+impedire che un run appeso tenga il lock e affami tutti i successivi.
+
+### Log su file
+
+I log vanno **sempre** in `<data dir>/logs/vintedbot.log`, con rotazione
+per dimensione (`VINTEDBOT_LOG_MAX_BYTES`, `VINTEDBOT_LOG_BACKUP_COUNT`).
+La console riceve i log solo in sessione interattiva o con `--verbose`:
+sotto Task Scheduler non c'è console e non deve dare errori.
+
+Ogni run apre con `run_started` e chiude con `run_finished`, entrambe con
+lo stesso `run_id`: filtrando per quell'id ricostruisci un'esecuzione,
+leggendo il file ricostruisci una giornata. Token e chat id sono
+mascherati ovunque, **traceback inclusi** — gli errori di rete tendono a
+incorporare l'URL della richiesta, che contiene il token.
+
+### Se il bot si rompe
+
+Un'eccezione non gestita finisce nel log con traceback completo e su
+Telegram con un messaggio breve (tipo di errore e contesto, mai il
+traceback né segreti). Per non sommergerti, la **stessa firma** di errore
+(tipo + punto del codice) viene notificata al massimo una volta ogni
+`VINTEDBOT_ERROR_NOTIFY_COOLDOWN_HOURS` (default 6); un errore diverso
+passa subito. Al primo run riuscito dopo dei fallimenti arriva un
+"✅ VintedBot è tornato operativo dopo N esecuzioni fallite".
+
+Se il guasto è Telegram stesso (token invalido, API irraggiungibili) non
+si tenta di notificarlo via Telegram: resta nel log. Lo stato sta in
+`<data dir>/health.json` e non nel database, di proposito: i guasti più
+importanti da segnalare sono proprio quelli in cui il DB è bloccato o
+corrotto, e un registro che dipende dal DB sarebbe muto lì.
+
+### Exit code (li leggerà lo scheduler)
+
+| Codice | Significato |
+|---|---|
+| `0` | successo, anche con zero risultati |
+| `1` | errore generico durante l'esecuzione |
+| `2` | configurazione invalida (`searches.toml`, credenziali, `.env`) |
+| `3` | un'altra istanza è già in esecuzione — **non è un guasto** |
+| `4` | watchdog: durata massima superata |
+
 ## Come funziona il tracking dei doppioni
 
 Ogni annuncio mostrato viene registrato in una tabella `seen_items` del
@@ -248,7 +427,11 @@ src/vintedbot/     codice applicativo (tipizzato, py.typed)
   search.py        search_all: paginazione sequenziale + dedup + limiti
   db.py            SQLite: apertura, migrazioni (user_version), pragmas
   repository.py    ItemRepository: tutte le query su seen_items (unico SQL)
-  app.py           orchestrazione: cerca → filtra visti → render → mark_seen
+  app.py           orchestrazione: cerca → filtra visti → render → mark_seen; run_all
+  searches.py      caricamento/validazione di searches.toml
+  paths.py         data dir per piattaforma, rilevamento cartelle sincronizzate
+  lock.py          lock singola istanza (OS-level, crash-safe)
+  health.py        notifica guasti con cooldown + messaggio di ripresa
   notifier.py      TelegramNotifier (API Bot HTTP, retry, token mai nei log)
   formatting.py    caption HTML per gli item (escaping, limite 1024)
   cli.py           CLI argparse + tabella rich (unico layer con print)
@@ -277,4 +460,6 @@ docs/api_notes.md  reverse engineering dell'endpoint di ricerca Vinted
 - [x] 4.1 Storico prezzi (`price_observations`, migrazione v4, comando `stats`)
 - [x] 4.2 Motore di stima (`pricing.py`), `backfill`, filtro `--min-score` (migrazione v5)
 - [x] 4.3 Collaudo reale end-to-end del filtro affare — 2026-08-23
-- [ ] 5. Scheduler (esecuzione periodica automatica)
+- [x] 5.1 Ricerche salvate (`searches.toml`) e comando `run-all`
+- [x] 5.2 Esecuzione non presidiata: data dir, lock, watchdog, log su file, notifica guasti
+- [ ] 5.3 Task Scheduler di Windows

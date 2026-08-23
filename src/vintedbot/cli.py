@@ -13,35 +13,56 @@ from __future__ import annotations
 import argparse
 import asyncio
 import re
+import sqlite3
 import statistics
 import sys
 import time
+import uuid
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from enum import IntEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import structlog
 from pydantic import ValidationError
 from rich.console import Console
 from rich.table import Table
 
 from vintedbot import __version__
-from vintedbot.app import run_backfill, run_search
+from vintedbot.app import run_all, run_backfill, run_search
 from vintedbot.client import VintedError
 from vintedbot.config import get_settings
-from vintedbot.log import setup_logging
+from vintedbot.health import HealthReporter
+from vintedbot.lock import LockBusyError, SingleInstanceLock
+from vintedbot.log import bind_run_context, setup_logging_from_settings
 from vintedbot.models import SearchFilters
 from vintedbot.notifier import TelegramConfigError, TelegramError, TelegramNotifier
+from vintedbot.paths import cloud_sync_marker
+from vintedbot.searches import SearchConfigError, load_searches
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from vintedbot.app import SearchOutcome
+    from vintedbot.app import RunAllOutcome, SearchOutcome
+    from vintedbot.config import Settings
     from vintedbot.models import Item
     from vintedbot.pricing import PriceEstimate
 
 _EPOCH = datetime.min.replace(tzinfo=UTC)  # sort fallback for items without a date
 _ITEM_URL_RE = re.compile(r"^(https://[^/]+/items/\d+)")
+
+logger = structlog.get_logger(__name__)
+
+
+class ExitCode(IntEnum):
+    """Process exit codes — the scheduler reads these (see README)."""
+
+    OK = 0  # successo, anche con zero risultati
+    ERROR = 1  # errore generico durante l'esecuzione
+    CONFIG = 2  # configurazione invalida (searches.toml, credenziali, .env)
+    LOCKED = 3  # un'altra istanza è già in esecuzione — NON è un guasto
+    TIMEOUT = 4  # watchdog: durata massima superata
 
 
 def _short_url(url: str) -> str:
@@ -63,6 +84,10 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Monitora annunci Vinted secondo filtri salvati.",
     )
     parser.add_argument("--version", action="version", version=f"vintedbot {__version__}")
+    parser.add_argument(
+        "--verbose", action="store_true",
+        help="Mostra i log anche su console (di default solo in sessione interattiva).",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     search = subparsers.add_parser("search", help="Esegue una ricerca sul catalogo Vinted.")
@@ -113,6 +138,30 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Con --min-score: scarta anche gli annunci senza punteggio.",
     )
 
+    run_all_parser = subparsers.add_parser(
+        "run-all",
+        help="Esegue tutte le ricerche salvate in searches.toml (modalità di produzione).",
+    )
+    run_all_parser.add_argument(
+        "--searches", metavar="PATH", type=Path,
+        help="File delle ricerche salvate (default da config: searches.toml).",
+    )
+    run_all_parser.add_argument(
+        "--only", action="append", metavar="NAME",
+        help="Esegue solo le ricerche con questo nome (ripetibile: "
+             "--only alfa --only beta). Vale anche per ricerche disabilitate.",
+    )
+    run_all_parser.add_argument(
+        "--dry-run", action="store_true", dest="dry_run",
+        help="Mostra tutto senza notificare e senza scrivere su seen_items "
+             "(le osservazioni prezzo vengono comunque registrate).",
+    )
+    run_all_parser.add_argument(
+        "--ignore-lock", action="store_true", dest="ignore_lock",
+        help="Esegue anche se un'altra istanza è in corso. SOLO PER DEBUG: "
+             "due run in parallelo possono duplicare notifiche.",
+    )
+
     backfill = subparsers.add_parser(
         "backfill",
         help="Popola lo storico prezzi (nessuna notifica, seen_items intatto).",
@@ -150,6 +199,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     stats.add_argument("--brand", help="Nome brand (es. 'just cavalli').")
     stats.add_argument("--catalog", type=int, metavar="ID", help="ID categoria.")
+
+    migrate = subparsers.add_parser(
+        "migrate-data",
+        help="Copia il database in un'altra posizione (fuori da OneDrive & co.).",
+    )
+    migrate.add_argument(
+        "--to", type=Path, required=True, metavar="PATH",
+        help="Percorso di destinazione (file .db o directory).",
+    )
     return parser
 
 
@@ -322,6 +380,250 @@ def _cmd_search(args: argparse.Namespace, console: Console, err_console: Console
         )
         return 1
     return 0  # zero risultati non è un errore
+
+
+def _cmd_run_all(args: argparse.Namespace, console: Console, err_console: Console) -> int:
+    """Run every enabled saved search in sequence (the scheduled command).
+
+    Wrapped in the single-instance lock, watched by the deadline, and
+    reported through :class:`HealthReporter`: this is the entry point that
+    runs with nobody looking at it.
+    """
+    settings = get_settings()
+    path = args.searches or settings.searches_path
+
+    try:
+        searches = load_searches(path)
+    except SearchConfigError as exc:
+        err_console.print(f"[red]Configurazione ricerche non valida:[/red]\n{exc}")
+        return ExitCode.CONFIG
+
+    if args.only:
+        requested = set(args.only)
+        unknown = sorted(requested - {search.name for search in searches})
+        if unknown:
+            available = ", ".join(repr(search.name) for search in searches)
+            names = ", ".join(repr(name) for name in unknown)
+            err_console.print(
+                f"[red]Errore:[/red] nessuna ricerca chiamata {names}. "
+                f"Disponibili: {available}"
+            )
+            return ExitCode.CONFIG
+        # --only è esplicito: esegue anche le ricerche disabilitate.
+        # Si mantiene l'ordine del file, non quello degli argomenti.
+        searches = [
+            search.model_copy(update={"enabled": True})
+            for search in searches
+            if search.name in requested
+        ]
+
+    def render(name: str, items: list[Item], estimates: dict[int, PriceEstimate]) -> None:
+        console.print(f"\n[bold cyan]▶ {name}[/bold cyan]")
+        _render_items_table(console, items, estimates)
+
+    run_id = uuid.uuid4().hex[:8]
+    bind_run_context(run_id=run_id)
+    enabled_names = [search.name for search in searches if search.enabled]
+
+    lock: SingleInstanceLock | None = None
+    if args.ignore_lock:
+        logger.warning("lock_ignored_debug_only", run_id=run_id)
+        console.print("[yellow]--ignore-lock: lock disattivato (solo per debug).[/yellow]")
+    else:
+        try:
+            lock = SingleInstanceLock(settings.lock_path)
+            lock.__enter__()
+        except LockBusyError as exc:
+            # Esito NORMALE quando il giro precedente è ancora in corso:
+            # info, nessuna notifica, exit code dedicato.
+            logger.info("run_skipped_already_running", holder=exc.holder, run_id=run_id)
+            console.print(
+                "[yellow]Un'altra istanza è già in esecuzione[/yellow] "
+                f"(pid {exc.holder.get('pid', '?')}, "
+                f"dalle {exc.holder.get('started_at', '?')}). "
+                "Usa --ignore-lock solo per debug."
+            )
+            return ExitCode.LOCKED
+        except OSError as exc:
+            err_console.print(f"[red]Impossibile acquisire il lock:[/red] {exc}")
+            return ExitCode.ERROR
+
+    logger.info(
+        "run_started",
+        run_id=run_id,
+        searches=enabled_names,
+        dry_run=args.dry_run,
+        deadline_seconds=settings.max_run_seconds,
+        db_path=str(settings.db_path),
+    )
+    start = time.perf_counter()
+    failure: BaseException | None = None
+    outcome = None
+    try:
+        outcome = asyncio.run(
+            run_all(
+                settings,
+                searches,
+                dry_run=args.dry_run,
+                deadline_seconds=settings.max_run_seconds,
+                render=render,
+            )
+        )
+    except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 — top-level handler
+        failure = exc
+    finally:
+        if lock is not None:
+            lock.__exit__(
+                type(failure) if failure is not None else None,
+                failure,
+                failure.__traceback__ if failure is not None else None,
+            )
+    duration = time.perf_counter() - start
+
+    return _finish_run(
+        outcome,
+        failure,
+        settings,
+        console,
+        err_console,
+        run_id=run_id,
+        duration=duration,
+        dry_run=args.dry_run,
+    )
+
+
+def _finish_run(  # noqa: PLR0913 — è il punto in cui tutti i fili si annodano
+    outcome: RunAllOutcome | None,
+    failure: BaseException | None,
+    settings: Settings,
+    console: Console,
+    err_console: Console,
+    *,
+    run_id: str,
+    duration: float,
+    dry_run: bool,
+) -> int:
+    """Log the closing line, report health, and pick the exit code."""
+    reporter = HealthReporter(settings)
+
+    if failure is not None or outcome is None:
+        error = failure or RuntimeError("esecuzione terminata senza risultato")
+        asyncio.run(reporter.report_failure(error, context="run-all"))
+        logger.info(
+            "run_finished", run_id=run_id, duration_seconds=round(duration, 1), outcome="crash"
+        )
+        err_console.print(
+            f"[red]Esecuzione fallita:[/red] {type(error).__name__} — "
+            f"dettagli nel log ({settings.log_dir / 'vintedbot.log'})."
+        )
+        return ExitCode.ERROR
+
+    console.print(_run_all_summary(outcome, duration, dry_run=dry_run))
+    totals = _run_totals(outcome)
+    logger.info(
+        "run_finished",
+        run_id=run_id,
+        duration_seconds=round(duration, 1),
+        searches_executed=len(outcome.reports),
+        searches_failed=outcome.failed_count,
+        searches_skipped=outcome.skipped_searches,
+        new_items=totals["new"],
+        notified=totals["notified"],
+        skipped_below_threshold=totals["skipped"],
+        timed_out=outcome.timed_out,
+        aborted=outcome.aborted_reason is not None,
+        outcome="ok" if outcome.ok else "error",
+    )
+
+    if outcome.timed_out:
+        err_console.print(
+            f"[red]Watchdog:[/red] superato il tempo massimo "
+            f"({settings.max_run_seconds:.0f}s). Ricerche non eseguite: "
+            f"{', '.join(outcome.skipped_searches) or 'nessuna'}."
+        )
+        asyncio.run(
+            reporter.report_failure(
+                TimeoutError(f"run-all oltre {settings.max_run_seconds:.0f}s"),
+                context="watchdog",
+            )
+        )
+        return ExitCode.TIMEOUT
+
+    if outcome.aborted_reason is not None:
+        err_console.print(
+            f"[red]Esecuzione interrotta:[/red] {outcome.aborted_reason} — "
+            "le ricerche rimanenti non sono state eseguite."
+        )
+        # Il guasto È Telegram: report_failure lo logga senza notificare.
+        asyncio.run(
+            reporter.report_failure(TelegramError(outcome.aborted_reason), context="notifiche")
+        )
+        return ExitCode.ERROR
+
+    if outcome.failed_count:
+        asyncio.run(
+            reporter.report_failure(
+                RuntimeError(f"{outcome.failed_count} ricerche fallite"), context="run-all"
+            )
+        )
+        return ExitCode.ERROR
+
+    asyncio.run(reporter.report_success())
+    return ExitCode.OK
+
+
+def _run_totals(outcome: RunAllOutcome) -> dict[str, int]:
+    totals = {"new": 0, "skipped": 0, "notified": 0}
+    for report in outcome.reports:
+        if report.outcome is None:
+            continue
+        totals["new"] += len(report.outcome.shown_items)
+        totals["skipped"] += report.outcome.notify_skipped
+        totals["notified"] += report.outcome.notified
+    return totals
+
+
+def _run_all_summary(outcome: RunAllOutcome, duration: float, *, dry_run: bool) -> Table:
+    """One row per saved search plus the totals of the whole execution."""
+    title = "Riepilogo run-all" + (" (dry-run: nessuna notifica)" if dry_run else "")
+    table = Table(title=title)
+    table.add_column("Ricerca")
+    table.add_column("Nuovi", justify="right")
+    table.add_column("Scartati", justify="right")
+    table.add_column("Notificati", justify="right")
+    table.add_column("Esito")
+
+    totals = {"new": 0, "skipped": 0, "notified": 0}
+    for report in outcome.reports:
+        if report.outcome is None:
+            table.add_row(report.name, "—", "—", "—", f"[red]errore:[/red] {report.error}")
+            continue
+        result = report.outcome
+        totals["new"] += len(result.shown_items)
+        totals["skipped"] += result.notify_skipped
+        totals["notified"] += result.notified
+        table.add_row(
+            report.name,
+            str(len(result.shown_items)),
+            str(result.notify_skipped),
+            str(result.notified),
+            "[green]ok[/green]",
+        )
+
+    verdict = (
+        f"[red]{outcome.failed_count} fallite[/red]"
+        if outcome.failed_count
+        else "[green]ok[/green]"
+    )
+    table.add_section()
+    table.add_row(
+        f"[bold]TOTALE ({len(outcome.reports)} ricerche · {duration:.1f}s)[/bold]",
+        f"[bold]{totals['new']}[/bold]",
+        f"[bold]{totals['skipped']}[/bold]",
+        f"[bold]{totals['notified']}[/bold]",
+        verdict,
+    )
+    return table
 
 
 _FIXTURE_PATH = Path("tests/fixtures/catalog_items_page1.json")
@@ -512,23 +814,116 @@ def _cmd_stats(args: argparse.Namespace, console: Console, err_console: Console)
     return 0
 
 
+_COUNTED_TABLES = ("seen_items", "price_observations")
+
+
+def _table_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    return {
+        table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])  # noqa: S608
+        for table in _COUNTED_TABLES
+    }
+
+
+def _cmd_migrate_data(args: argparse.Namespace, console: Console, err_console: Console) -> int:
+    """Copy the database to a new location, WAL contents included.
+
+    Uses ``Connection.backup()`` rather than copying files: with WAL
+    enabled a plain file copy of the ``.db`` silently drops whatever is
+    still in the ``-wal`` sidecar. The source is left untouched — verify
+    the counts, update ``.env``, then delete it yourself.
+    """
+    from contextlib import closing
+
+    from vintedbot.db import get_connection
+
+    settings = get_settings()
+    source = settings.db_path
+    destination: Path = args.to
+    if destination.is_dir() or not destination.suffix:
+        destination = destination / source.name
+
+    if not source.exists():
+        err_console.print(f"[red]Errore:[/red] database di origine non trovato: {source}")
+        return ExitCode.CONFIG
+    if destination.exists():
+        err_console.print(
+            f"[red]Errore:[/red] la destinazione esiste già: {destination}\n"
+            "Rimuovila o scegli un altro percorso: non sovrascrivo un DB esistente."
+        )
+        return ExitCode.CONFIG
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with closing(get_connection(source)) as source_conn:
+        before = _table_counts(source_conn)
+        with closing(sqlite3.connect(destination)) as target_conn:
+            source_conn.backup(target_conn)
+
+    with closing(get_connection(destination)) as check_conn:
+        after = _table_counts(check_conn)
+
+    console.print(f"Origine:      {source}")
+    console.print(f"Destinazione: {destination}")
+    for table in _COUNTED_TABLES:
+        status = "[green]ok[/green]" if before[table] == after[table] else "[red]DIVERSO[/red]"
+        console.print(f"  {table}: {before[table]} → {after[table]} {status}")
+
+    if before != after:
+        err_console.print(
+            "[red]Verifica fallita:[/red] i conteggi non coincidono, "
+            "la destinazione NON è affidabile."
+        )
+        return ExitCode.ERROR
+
+    console.print(
+        "\n[green]Copia verificata.[/green] Aggiungi al tuo .env:\n"
+        f"  VINTEDBOT_DB_PATH={destination}\n"
+        f"  VINTEDBOT_DATA_DIR={destination.parent}\n"
+        "L'originale è rimasto al suo posto: cancellalo tu a verifica fatta."
+    )
+    return ExitCode.OK
+
+
+def _warn_if_cloud_synced(settings: Settings, err_console: Console) -> None:
+    """Nag (once per run) when the database lives in a synced folder."""
+    marker = cloud_sync_marker(settings.db_path)
+    if marker is None:
+        return
+    logger.warning(
+        "db_in_cloud_synced_folder",
+        db_path=str(settings.db_path),
+        service=marker,
+        hint="usa `vintedbot migrate-data --to <data dir>`",
+    )
+    err_console.print(
+        f"[yellow]Attenzione:[/yellow] il database è dentro una cartella sincronizzata "
+        f"({marker}): {settings.db_path}\n"
+        "La sincronizzazione può bloccare il file e corrompere il WAL. "
+        "Spostalo con: vintedbot migrate-data --to <percorso>"
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point for the ``vintedbot`` script and ``python -m vintedbot``."""
     args = _build_parser().parse_args(argv)
     settings = get_settings()
-    setup_logging(settings.log_level, json_output=settings.log_json)
+    setup_logging_from_settings(settings, verbose=getattr(args, "verbose", False))
 
     console = Console()
     err_console = Console(stderr=True)
+    _warn_if_cloud_synced(settings, err_console)
 
     if args.command == "search":
         return _cmd_search(args, console, err_console)
     if args.command == "notify-test":
         return _cmd_notify_test(args, console, err_console)
+    if args.command == "run-all":
+        return _cmd_run_all(args, console, err_console)
     if args.command == "backfill":
         return _cmd_backfill(args, console, err_console)
     if args.command == "stats":
         return _cmd_stats(args, console, err_console)
+    if args.command == "migrate-data":
+        return _cmd_migrate_data(args, console, err_console)
     raise AssertionError("unreachable: argparse enforces a valid subcommand")
 
 

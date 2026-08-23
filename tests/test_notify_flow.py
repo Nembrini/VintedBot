@@ -98,12 +98,15 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db_path: Path) -> None:
     settings = Settings(  # type: ignore[call-arg]
         _env_file=None,
         db_path=db_path,
+        data_dir=db_path.parent,
         telegram_bot_token=TOKEN,
         telegram_chat_id="42",
         notify_pause_seconds=1.0,
     )
     monkeypatch.setattr(vintedbot.cli, "get_settings", lambda: settings)
-    monkeypatch.setattr(vintedbot.cli, "setup_logging", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        vintedbot.cli, "setup_logging_from_settings", lambda *a, **kw: None
+    )
     monkeypatch.setattr(vintedbot.app, "TelegramNotifier", FakeNotifier)
 
     async def fake_sleep(delay: float) -> None:
@@ -208,7 +211,7 @@ def test_no_notify_flag_skips_telegram_entirely(
 def test_missing_credentials_behave_like_no_notify(
     monkeypatch: pytest.MonkeyPatch, db_path: Path
 ) -> None:
-    settings = Settings(_env_file=None, db_path=db_path)  # type: ignore[call-arg]
+    settings = Settings(_env_file=None, db_path=db_path, data_dir=db_path.parent)  # type: ignore[call-arg]
     monkeypatch.setattr(vintedbot.cli, "get_settings", lambda: settings)
     set_pages(monkeypatch, [make_item(1)])
 
@@ -372,7 +375,7 @@ def test_queue_sorted_by_score_before_cap(
 ) -> None:
     install_fake_estimate(monkeypatch)
     settings = Settings(  # type: ignore[call-arg]
-        _env_file=None, db_path=db_path,
+        _env_file=None, db_path=db_path, data_dir=db_path.parent,
         telegram_bot_token=TOKEN, telegram_chat_id="42",
         max_notifications_per_run=2,
     )
