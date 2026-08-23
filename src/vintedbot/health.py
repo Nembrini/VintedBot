@@ -29,6 +29,7 @@ import structlog
 from vintedbot.notifier import TelegramError, TelegramNotifier
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
     from vintedbot.config import Settings
@@ -43,6 +44,11 @@ class HealthState:
     consecutive_failures: int = 0
     #: signature -> ISO timestamp of the last notification sent for it
     notified_at: dict[str, str] = field(default_factory=dict)
+    #: Summary of the most recent run, for `doctor` to report. Kept here
+    #: rather than parsed back out of the log file: log lines are rendered
+    #: for humans and their shape changes with VINTEDBOT_LOG_JSON, while
+    #: this file is already the one designed to outlive database trouble.
+    last_run: dict[str, object] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path) -> HealthState:
@@ -54,12 +60,14 @@ class HealthState:
         if not isinstance(raw, dict):
             return cls()
         notified = raw.get("notified_at")
+        last_run = raw.get("last_run")
         return cls(
             consecutive_failures=int(raw.get("consecutive_failures", 0) or 0),
             notified_at={
                 str(key): str(value)
                 for key, value in (notified.items() if isinstance(notified, dict) else ())
             },
+            last_run=dict(last_run) if isinstance(last_run, dict) else {},
         )
 
     def save(self, path: Path) -> None:
@@ -71,6 +79,7 @@ class HealthState:
                     {
                         "consecutive_failures": self.consecutive_failures,
                         "notified_at": self.notified_at,
+                        "last_run": self.last_run,
                     },
                     indent=1,
                 ),
@@ -173,6 +182,26 @@ class HealthReporter:
 
         self.state.save(self._path)
         return notified
+
+    def record_last_run(
+        self,
+        *,
+        outcome: str,
+        exit_code: int,
+        duration_seconds: float,
+        trigger: str,
+        totals: Mapping[str, int] | None = None,
+    ) -> None:
+        """Store how the run ended, so `doctor` can say it without reading logs."""
+        self.state.last_run = {
+            "finished_at": self._now.isoformat(),
+            "outcome": outcome,
+            "exit_code": exit_code,
+            "duration_seconds": round(duration_seconds, 1),
+            "trigger": trigger,
+            **({} if totals is None else {key: int(value) for key, value in totals.items()}),
+        }
+        self.state.save(self._path)
 
     # ------------------------------------------------------------ internals
 
