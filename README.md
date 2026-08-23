@@ -59,6 +59,7 @@ src/vintedbot/     codice applicativo (tipizzato, py.typed)
   models.py        SearchFilters / Item (parsing tollerante del JSON API)
   client.py        VintedClient async (curl_cffi, rate limit, retry)
   search.py        search_all: paginazione sequenziale + dedup + limiti
+  db.py            SQLite: apertura, migrazioni (user_version), pragmas
   cli.py           CLI argparse + tabella rich (unico layer con print)
   __main__.py      python -m vintedbot
 tests/             test pytest (+ fixtures/ con risposta API reale)
@@ -73,5 +74,6 @@ docs/api_notes.md  reverse engineering dell'endpoint di ricerca Vinted
 - [x] 1.4 Client HTTP async (`client.py`) — verificato live 2026-08-23
 - [x] 1.5 Ricerca paginata (`search.py`)
 - [x] 1.6 CLI con output rich (`cli.py`)
-- [x] 1.7 Test suite (24 test, zero rete)
-- [ ] 2. Persistenza SQLite (dedup tra esecuzioni)
+- [x] 1.7 Test suite (zero rete)
+- [x] 2.1 Modulo DB SQLite (`db.py`: schema seen_items, migrazioni)
+- [ ] 2.2 Repository (accesso dati per il flusso di ricerca)

@@ -7,6 +7,7 @@ Every variable is prefixed with ``VINTEDBOT_`` (e.g. ``VINTEDBOT_BASE_URL``).
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, HttpUrl, field_validator
@@ -46,6 +47,10 @@ class Settings(BaseSettings):
         gt=0,
         le=60,
         description="Connect timeout for HTTP calls (seconds).",
+    )
+    db_path: Path = Field(
+        default=Path("data/vintedbot.db"),
+        description="SQLite database file; parent directory is created on first open.",
     )
     search_max_pages: int = Field(
         default=5,

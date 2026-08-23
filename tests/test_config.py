@@ -18,6 +18,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "VINTEDBOT_CONNECT_TIMEOUT_SECONDS",
         "VINTEDBOT_SEARCH_MAX_PAGES",
         "VINTEDBOT_SEARCH_MAX_ITEMS",
+        "VINTEDBOT_DB_PATH",
         "VINTEDBOT_LOG_LEVEL",
         "VINTEDBOT_LOG_JSON",
     ):
