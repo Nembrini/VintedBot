@@ -64,6 +64,30 @@ class Settings(BaseSettings):
         le=2000,
         description="Default item cap for a paginated search.",
     )
+    pricing_min_sample_size: int = Field(
+        default=8,
+        ge=1,
+        le=1000,
+        description="Below this many deduped observations the score is None (unknown).",
+    )
+    pricing_max_discount: float = Field(
+        default=0.60,
+        gt=0,
+        le=1,
+        description="Discount vs median that maps to the top of the score curve.",
+    )
+    pricing_confidence_k: int = Field(
+        default=10,
+        ge=0,
+        le=1000,
+        description="Shrinkage constant: confidence = n / (n + k).",
+    )
+    pricing_max_age_days: int = Field(
+        default=90,
+        ge=1,
+        le=3650,
+        description="Observation window for the market estimate.",
+    )
     max_notifications_per_run: int = Field(
         default=10,
         ge=1,

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import re
+import statistics
 import sys
 import time
 from datetime import UTC, datetime
@@ -25,7 +26,7 @@ from rich.console import Console
 from rich.table import Table
 
 from vintedbot import __version__
-from vintedbot.app import run_search
+from vintedbot.app import run_backfill, run_search
 from vintedbot.client import VintedError
 from vintedbot.config import get_settings
 from vintedbot.log import setup_logging
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
 
     from vintedbot.app import SearchOutcome
     from vintedbot.models import Item
+    from vintedbot.pricing import PriceEstimate
 
 _EPOCH = datetime.min.replace(tzinfo=UTC)  # sort fallback for items without a date
 _ITEM_URL_RE = re.compile(r"^(https://[^/]+/items/\d+)")
@@ -101,6 +103,32 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-notify", action="store_true", dest="no_notify",
         help="Salta le notifiche Telegram (solo tabella, come lo step 2).",
     )
+    search.add_argument(
+        "--min-score", type=int, metavar="N", dest="min_score",
+        help="Notifica SOLO gli annunci con punteggio affare >= N (0-100). "
+             "Gli annunci senza punteggio passano comunque, salvo --strict-score.",
+    )
+    search.add_argument(
+        "--strict-score", action="store_true", dest="strict_score",
+        help="Con --min-score: scarta anche gli annunci senza punteggio.",
+    )
+
+    backfill = subparsers.add_parser(
+        "backfill",
+        help="Popola lo storico prezzi (nessuna notifica, seen_items intatto).",
+    )
+    backfill.add_argument("--keyword", help="Testo di ricerca libero.")
+    backfill.add_argument("--catalog", action="append", type=int, metavar="ID")
+    backfill.add_argument("--brand", action="append", type=int, metavar="ID")
+    backfill.add_argument("--size", action="append", type=int, metavar="ID")
+    backfill.add_argument("--condition", action="append", type=int, metavar="ID")
+    backfill.add_argument("--min-price", type=_decimal_arg, metavar="EUR")
+    backfill.add_argument(
+        "--max-price", type=_decimal_arg, metavar="EUR",
+        help="IGNORATO con un warning: lo storico ha bisogno anche dei prezzi alti.",
+    )
+    backfill.add_argument("--max-pages", type=int, metavar="N", default=10)
+    backfill.add_argument("--max-items", type=int, metavar="N")
 
     notify_test = subparsers.add_parser(
         "notify-test",
@@ -111,6 +139,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Invia una notifica di esempio (foto+didascalia) dal primo item "
              "della fixture di test, senza chiamare Vinted.",
     )
+
+    stats = subparsers.add_parser(
+        "stats",
+        help="Mostra lo storico prezzi per combinazione (brand, categoria).",
+    )
+    stats.add_argument(
+        "--evaluate", type=_decimal_arg, metavar="PREZZO",
+        help="Valuta un prezzo contro una combinazione (richiede --brand).",
+    )
+    stats.add_argument("--brand", help="Nome brand (es. 'just cavalli').")
+    stats.add_argument("--catalog", type=int, metavar="ID", help="ID categoria.")
     return parser
 
 
@@ -128,7 +167,9 @@ def _relative_time(published_at: datetime | None, now: datetime) -> str:
     return f"{int(seconds // 86400)} g fa"
 
 
-def _render_items_table(console: Console, items_to_show: list[Item]) -> None:
+def _render_items_table(
+    console: Console, items_to_show: list[Item], estimates: dict[int, PriceEstimate]
+) -> None:
     """Render the results table (and nothing else) for the given items."""
     now = datetime.now(tz=UTC)
     items: list[Item] = sorted(
@@ -138,6 +179,7 @@ def _render_items_table(console: Console, items_to_show: list[Item]) -> None:
     table = Table(title="Risultati Vinted", show_lines=False)
     table.add_column("Titolo", max_width=32, overflow="ellipsis", no_wrap=True)
     table.add_column("Prezzo", justify="right", style="bold", no_wrap=True)
+    table.add_column("Affare", justify="right", no_wrap=True)
     table.add_column("Brand", max_width=14, overflow="ellipsis", no_wrap=True)
     table.add_column("Taglia", no_wrap=True)
     table.add_column("Condizione", max_width=12, overflow="ellipsis", no_wrap=True)
@@ -145,9 +187,12 @@ def _render_items_table(console: Console, items_to_show: list[Item]) -> None:
     table.add_column("URL", style="dim", no_wrap=True)
 
     for item in items:
+        item_estimate = estimates.get(item.id)
+        score = item_estimate.score if item_estimate is not None else None
         table.add_row(
             item.title,
             f"{item.price.amount} {item.price.currency}",
+            f"{score}/100" if score is not None else "—",
             item.brand or "—",
             item.size or "—",
             item.condition or "—",
@@ -169,8 +214,11 @@ def _summary_line(outcome: SearchOutcome, duration_seconds: float) -> str:
     else:
         summary = (
             f"[bold]{len(outcome.shown_items)}[/bold] nuovi / "
-            f"{outcome.already_seen} già visti / {total_found} totali trovati"
+            f"{outcome.already_seen} già visti"
         )
+        if outcome.min_score_active:
+            summary += f" / {outcome.notify_skipped} sotto soglia scartati"
+        summary += f" / {total_found} totali trovati"
     if outcome.notifications_enabled:
         summary += (
             f" · {outcome.notified} notifiche inviate / {outcome.notify_failed} fallite"
@@ -179,6 +227,8 @@ def _summary_line(outcome: SearchOutcome, duration_seconds: float) -> str:
         if outcome.notify_queue_remaining:
             summary += f" · {outcome.notify_queue_remaining} in coda per i prossimi giri"
     summary += (
+        f" · {outcome.price_observations} osservazioni prezzo registrate"
+        f" (storico: {outcome.price_observations_total})"
         f" · {outcome.result.pages_fetched} pagine · {duration_seconds:.1f}s"
         f" — DB: {outcome.tracked_total} item tracciati"
     )
@@ -204,10 +254,19 @@ def _cmd_search(args: argparse.Namespace, console: Console, err_console: Console
         err_console.print(f"[red]Filtri non validi:[/red] {exc}")
         return 2
 
-    def render(items: list[Item]) -> None:
+    if args.min_score is not None and not 0 <= args.min_score <= 100:
+        err_console.print(
+            f"[red]Errore:[/red] --min-score deve essere tra 0 e 100 (ricevuto {args.min_score})."
+        )
+        return 2
+    if args.strict_score and args.min_score is None:
+        err_console.print("[red]Errore:[/red] --strict-score richiede --min-score.")
+        return 2
+
+    def render(items: list[Item], estimates: dict[int, PriceEstimate]) -> None:
         # Nome risolto a runtime dai global del modulo: i test possono
         # sostituire _render_items_table per simulare un rendering fallito.
-        _render_items_table(console, items)
+        _render_items_table(console, items, estimates)
 
     start = time.perf_counter()
     try:
@@ -220,6 +279,8 @@ def _cmd_search(args: argparse.Namespace, console: Console, err_console: Console
                 show_all=args.show_all,
                 purge_days=args.purge_days,
                 notify=not args.no_notify,
+                min_score=args.min_score,
+                strict_score=args.strict_score,
                 render=render,
             )
         )
@@ -246,6 +307,10 @@ def _cmd_search(args: argparse.Namespace, console: Console, err_console: Console
                     f" · {outcome.notified} notifiche arretrate inviate"
                     f" / {outcome.notify_failed} fallite"
                 )
+            message += (
+                f" · {outcome.price_observations} osservazioni prezzo registrate"
+                f" (storico: {outcome.price_observations_total})"
+            )
             console.print(message)
     else:
         console.print(_summary_line(outcome, duration))
@@ -306,6 +371,147 @@ def _cmd_notify_test(args: argparse.Namespace, console: Console, err_console: Co
     return 0
 
 
+def _cmd_backfill(args: argparse.Namespace, console: Console, err_console: Console) -> int:
+    """Populate the price history: observations only, no seen/notify effects."""
+    if args.max_price is not None:
+        err_console.print(
+            "[yellow]Avviso:[/yellow] --max-price è IGNORATO nel backfill: per lo "
+            "storico servono anche i prezzi alti."
+        )
+    try:
+        filters = SearchFilters(
+            keyword=args.keyword,
+            category_ids=tuple(args.catalog or ()),
+            brand_ids=tuple(args.brand or ()),
+            size_ids=tuple(args.size or ()),
+            condition_ids=tuple(args.condition or ()),
+            price_min=args.min_price,
+            price_max=None,  # deliberato: mai un tetto prezzo nello storico
+        )
+    except ValidationError as exc:
+        err_console.print(f"[red]Filtri non validi:[/red] {exc}")
+        return 2
+
+    start = time.perf_counter()
+    try:
+        outcome = asyncio.run(
+            run_backfill(
+                get_settings(), filters, max_pages=args.max_pages, max_items=args.max_items
+            )
+        )
+    except VintedError as exc:
+        err_console.print(f"[red]Errore:[/red] {exc}")
+        return 1
+    duration = time.perf_counter() - start
+
+    if outcome.brands:
+        table = Table(title="Storico dopo il backfill (finestra corrente)")
+        table.add_column("Brand")
+        table.add_column("Campione", justify="right")
+        table.add_column("Mediana", justify="right")
+        for snapshot in outcome.brands:
+            table.add_row(
+                snapshot.brand,
+                str(snapshot.sample_size),
+                f"{snapshot.median:.2f}" if snapshot.median is not None else "—",
+            )
+        console.print(table)
+
+    catalog_label = outcome.catalog_id if outcome.catalog_id is not None else "—"
+    console.print(
+        f"[bold]{outcome.observations_written}[/bold] osservazioni nuove su "
+        f"{outcome.found} item · categoria {catalog_label} · "
+        f"{outcome.pages_fetched} pagine · {duration:.1f}s — storico totale: "
+        f"{outcome.observations_total}"
+    )
+    return 0
+
+
+def _cmd_stats(args: argparse.Namespace, console: Console, err_console: Console) -> int:
+    """Per-(brand, catalog) history table, or --evaluate for one price."""
+    from contextlib import closing
+
+    from vintedbot.db import get_connection
+    from vintedbot.pricing import estimate
+    from vintedbot.repository import PriceRepository
+
+    settings = get_settings()
+
+    if args.evaluate is not None and not args.brand:
+        err_console.print("[red]Errore:[/red] --evaluate richiede --brand.")
+        return 2
+
+    with closing(get_connection(settings.db_path)) as conn:
+        price_repo = PriceRepository(conn)
+
+        if args.evaluate is not None:
+            observations = price_repo.get_observations(
+                args.brand, args.catalog, settings.pricing_max_age_days
+            )
+            result = estimate(
+                args.evaluate,
+                observations,
+                min_sample_size=settings.pricing_min_sample_size,
+                max_discount=settings.pricing_max_discount,
+                confidence_k=settings.pricing_confidence_k,
+            )
+            catalog_label = args.catalog if args.catalog is not None else "—"
+            console.print(
+                f"[bold]Valutazione[/bold] {args.evaluate} EUR — brand "
+                f"{args.brand!r} · categoria {catalog_label}"
+            )
+            console.print(f"  campione (dedup, {settings.pricing_max_age_days}g): "
+                          f"{result.sample_size}")
+            console.print(f"  mediana:  {result.median if result.median is not None else 'n/d'}")
+            if result.score is not None and result.discount_pct is not None:
+                console.print(f"  sconto:   {result.discount_pct * 100:+.1f}% vs mediana")
+                console.print(f"  punteggio: [bold]{result.score}/100[/bold]")
+            else:
+                console.print(
+                    "  punteggio: n/d (campione sotto "
+                    f"{settings.pricing_min_sample_size})"
+                )
+            return 0
+
+        rows = price_repo.stats()
+        total = price_repo.count_observations()
+
+        if not rows:
+            console.print("Storico prezzi vuoto: nessuna osservazione registrata finora.")
+            return 0
+
+        table = Table(title="Storico osservazioni prezzo")
+        table.add_column("Brand")
+        table.add_column("Categoria", justify="right")
+        table.add_column("Osservazioni", justify="right")
+        table.add_column("Campione*", justify="right")
+        table.add_column("Mediana", justify="right")
+        table.add_column("Prima", justify="right")
+        table.add_column("Ultima", justify="right")
+        for row in rows:
+            observations = price_repo.get_observations(
+                row.brand, row.catalog_id, settings.pricing_max_age_days
+            )
+            median = (
+                statistics.median(obs.price for obs in observations) if observations else None
+            )
+            table.add_row(
+                row.brand or "—",
+                str(row.catalog_id) if row.catalog_id is not None else "—",
+                str(row.observations),
+                str(len(observations)),
+                f"{median:.2f}" if median is not None else "—",
+                row.first_observed_at[:16].replace("T", " "),
+                row.last_observed_at[:16].replace("T", " "),
+            )
+        console.print(table)
+        console.print(
+            f"[bold]{total}[/bold] osservazioni totali · {len(rows)} combinazioni · "
+            f"*Campione = dedup per item, finestra {settings.pricing_max_age_days} giorni"
+        )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point for the ``vintedbot`` script and ``python -m vintedbot``."""
     args = _build_parser().parse_args(argv)
@@ -319,6 +525,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_search(args, console, err_console)
     if args.command == "notify-test":
         return _cmd_notify_test(args, console, err_console)
+    if args.command == "backfill":
+        return _cmd_backfill(args, console, err_console)
+    if args.command == "stats":
+        return _cmd_stats(args, console, err_console)
     raise AssertionError("unreachable: argparse enforces a valid subcommand")
 
 

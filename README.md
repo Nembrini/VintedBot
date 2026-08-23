@@ -55,10 +55,105 @@ Senza credenziali Telegram il comando `search` funziona comunque.
 
 Flag aggiuntivi:
 - `--all` — modalità consultazione: mostra tutti i risultati, bypassa il
-  filtro, **non scrive nulla** nel DB e non notifica;
-- `--purge-days N` — prima della ricerca elimina i record visti da più
-  di N giorni (N deve essere positivo);
+  filtro "già visti" e non notifica. Eccezione (voluta): le
+  **osservazioni prezzo vengono registrate comunque** — osservare non è
+  notificare;
+- `--purge-days N` — prima della ricerca elimina, con la stessa soglia,
+  sia i record visti sia le **osservazioni prezzo** più vecchie di N
+  giorni (N deve essere positivo);
 - `--no-notify` — salta le notifiche Telegram (solo tabella).
+
+### Storico prezzi (base della stima di mercato)
+
+Ogni esecuzione di `search` registra il prezzo di TUTTI gli item
+restituiti (nuovi e già visti) in `price_observations`: una osservazione
+per item per esecuzione — un annuncio riapparso ribassato è informazione
+preziosa. Brand normalizzato (trim+lowercase), categoria attribuita solo
+se la ricerca aveva una sola `--catalog`. Ispezione:
+
+```bash
+uv run vintedbot stats
+```
+
+mostra le combinazioni (brand, categoria) con osservazioni, campione
+effettivo (dedup per item + finestra `PRICING_MAX_AGE_DAYS`) e mediana.
+Con `stats --evaluate PREZZO --brand X [--catalog Y]` valuti un prezzo a
+mano contro lo storico. Per popolare lo storico senza toccare visto/
+notifiche: `vintedbot backfill --catalog … --brand …` (ignora
+`--max-price` con un warning: lo storico ha bisogno anche dei prezzi
+alti).
+
+## Punteggio affare
+
+### Come funziona, in parole semplici
+
+1. Per ogni annuncio si guarda **quanto costano di solito** gli articoli
+   dello stesso brand nella stessa categoria (la **mediana** dello
+   storico prezzi, entro la finestra temporale).
+2. Si calcola **quanto è più economico** di quella mediana.
+3. Lo sconto diventa un punteggio 0-100: uno sconto pari a
+   `MAX_DISCOUNT` vale il massimo, la mediana vale 0, un prezzo sopra la
+   mediana vale comunque 0 (mai negativo).
+4. Il punteggio viene poi **ridotto se lo storico è povero**: con pochi
+   annunci di confronto la stima è incerta, quindi il bot è prudente.
+
+```
+sconto     = (mediana − prezzo) / mediana
+grezzo     = min(sconto / MAX_DISCOUNT, 1) · 100
+fiducia    = n / (n + K)          # n = annunci di confronto
+punteggio  = grezzo · fiducia
+```
+
+Sotto `MIN_SAMPLE_SIZE` annunci di confronto il punteggio è **n/d**:
+"non lo so" è diverso da "non è un affare".
+
+### I quattro parametri di taratura (`.env`)
+
+| Variabile | Default | Effetto pratico |
+|---|---|---|
+| `VINTEDBOT_PRICING_MAX_DISCOUNT` | `0.60` | Quale sconto vale 100. **Abbassarlo rende la curva più generosa** (con 0.50, −40% vale 76 invece di 63); alzarlo la rende severa. |
+| `VINTEDBOT_PRICING_CONFIDENCE_K` | `10` | **Alzarlo rende il punteggio più prudente sui brand con poco storico** (con K=50 servono molti più annunci prima di dare punteggi alti); abbassarlo si fida subito. |
+| `VINTEDBOT_PRICING_MIN_SAMPLE_SIZE` | `8` | Sotto questa soglia niente punteggio. Alzarlo = più annunci "n/d" ma stime più solide. |
+| `VINTEDBOT_PRICING_MAX_AGE_DAYS` | `90` | Quanto guardare indietro. Abbassarlo segue i prezzi correnti, alzarlo dà campioni più grandi ma più vecchi. |
+
+Il punteggio appare nella colonna "Affare" della tabella e nella caption
+Telegram: 💎 con stima piena, 📊 se lo storico è insufficiente, nessuna
+riga se non ci sono dati.
+
+### Filtrare le notifiche
+
+```bash
+# notifica solo gli affari veri (score >= 60)
+uv run vintedbot search --catalog 257 --brand 20117 --min-score 60
+
+# ...e scarta anche quelli senza storico sufficiente
+uv run vintedbot search --catalog 257 --brand 20117 --min-score 60 --strict-score
+```
+
+- Senza `--min-score` il filtro è **spento**: si notifica tutto, con il
+  punteggio in caption dove disponibile.
+- Gli annunci **senza punteggio passano** (meglio un falso allarme che un
+  affare perso), salvo `--strict-score`.
+- Un annuncio sotto soglia è scartato **definitivamente** (`skipped_at`):
+  non rientra dalla coda nei giri successivi.
+- Gli arretrati sono rivalutati a ogni giro coi criteri correnti; la coda
+  è ordinata per punteggio decrescente, quindi quando l'anti-valanga
+  taglia partono prima gli affari migliori.
+- La tabella a schermo mostra sempre **tutti** i nuovi: il filtro agisce
+  solo sulle notifiche.
+
+### Procedura di collaudo dello step 4 (eseguita il 2026-08-23)
+
+1. `uv run pytest` verde; `uv run vintedbot stats` per verificare che la
+   combinazione da collaudare abbia campione ≥ 30.
+2. Taratura a tavolino: `stats --evaluate` su mediana, −20%, −40%, −60%
+   e confronto della curva; eventuale ritocco dei parametri nel `.env`.
+3. Run 1 senza filtro → notifiche con riga punteggio, ordinate per score.
+4. Run 2 con `--min-score` → solo sopra soglia, `S sotto soglia scartati`
+   nel riepilogo, `skipped_at` valorizzato in DB.
+5. Run 3 identica → gli scartati non tornano; la coda arretrata si smaltisce.
+6. Run 4 con `--strict-score` su un brand senza storico → zero notifiche,
+   tutti skipped.
 
 ### Semantica visto / notificato
 
@@ -179,4 +274,7 @@ docs/api_notes.md  reverse engineering dell'endpoint di ricerca Vinted
 - [x] 3.2 Notifica item con foto (`formatting.py`, `send_item`, `notify-test --with-item`) — verificata live
 - [x] 3.3 Notifiche nel flusso di ricerca (notified_at, retry arretrati, anti-valanga, --no-notify)
 - [x] 3.4 Collaudo end-to-end reale — 2026-08-23 (album foto + data caricamento aggiunti su richiesta)
-- [ ] 4. Stima del prezzo di mercato
+- [x] 4.1 Storico prezzi (`price_observations`, migrazione v4, comando `stats`)
+- [x] 4.2 Motore di stima (`pricing.py`), `backfill`, filtro `--min-score` (migrazione v5)
+- [x] 4.3 Collaudo reale end-to-end del filtro affare — 2026-08-23
+- [ ] 5. Scheduler (esecuzione periodica automatica)

@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 
     from vintedbot.config import Settings
     from vintedbot.models import Item
+    from vintedbot.pricing import PriceEstimate
 
 logger = structlog.get_logger(__name__)
 
@@ -157,7 +158,7 @@ class TelegramNotifier:
         )
         logger.info("telegram_message_sent")
 
-    async def send_item(self, item: Item) -> None:
+    async def send_item(self, item: Item, estimate: PriceEstimate | None = None) -> None:
         """Send one item with ALL its photos + HTML caption; degrade gracefully.
 
         - 2+ photos: ``sendMediaGroup`` (Telegram album, max 10; the caption
@@ -171,7 +172,7 @@ class TelegramNotifier:
           must arrive anyway. Any other error (401 token, chat not found, …)
           propagates exactly like in ``send_text`` — no fallback.
         """
-        caption = format_item_message(item)
+        caption = format_item_message(item, estimate)
         photos = item.photo_urls[:_ALBUM_MAX_PHOTOS]
         if not photos and item.photo_url:
             photos = (item.photo_url,)  # righe pre-v3: solo la principale

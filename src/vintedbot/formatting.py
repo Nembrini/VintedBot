@@ -28,6 +28,7 @@ from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
     from vintedbot.models import Item
+    from vintedbot.pricing import PriceEstimate
 
 #: Timezone used to DISPLAY the upload time (stored as UTC).
 _DISPLAY_TZ = ZoneInfo("Europe/Rome")
@@ -38,14 +39,16 @@ CAPTION_MAX_CHARS = 1024
 _ELLIPSIS = "…"
 
 
-def format_item_message(item: Item) -> str:
+def format_item_message(item: Item, estimate: PriceEstimate | None = None) -> str:
     """Build the HTML caption for one item, always within Telegram's limit.
 
     Missing fields (brand/size/condition) drop out of their line without
     leaving "None" or orphan separators; if all three are missing the
-    whole 🏷 line disappears.
+    whole 🏷 line disappears. The market-estimate line appears when an
+    estimate is provided: full (💎 score) with enough history, "storico
+    insufficiente" (📊) with a small sample, nothing at all with no data.
     """
-    message = _compose(item, item.title)
+    message = _compose(item, item.title, estimate)
     if len(message) <= CAPTION_MAX_CHARS:
         return message
 
@@ -55,14 +58,14 @@ def format_item_message(item: Item) -> str:
     max_len = len(item.title)
     while max_len > 0:
         candidate = item.title[:max_len].rstrip() + _ELLIPSIS
-        message = _compose(item, candidate)
+        message = _compose(item, candidate, estimate)
         if len(message) <= CAPTION_MAX_CHARS:
             return message
         max_len -= max(len(message) - CAPTION_MAX_CHARS, 1)
-    return _compose(item, _ELLIPSIS)  # titolo irrilevante: resta il resto
+    return _compose(item, _ELLIPSIS, estimate)  # titolo irrilevante: resta il resto
 
 
-def _compose(item: Item, raw_title: str) -> str:
+def _compose(item: Item, raw_title: str, estimate: PriceEstimate | None = None) -> str:
     """Assemble the caption with the given (possibly trimmed) raw title."""
     lines = [
         f"<b>{_escape(raw_title)}</b>",
@@ -85,8 +88,32 @@ def _compose(item: Item, raw_title: str) -> str:
         local_time = item.published_at.astimezone(_DISPLAY_TZ)
         lines.append(f"🕒 Caricato: {local_time:%d/%m/%Y %H:%M}")
 
+    estimate_line = _estimate_line(item, estimate)
+    if estimate_line is not None:
+        lines.append(estimate_line)
+
     lines.append(f'🔗 <a href="{html.escape(item.url, quote=True)}">Apri su Vinted</a>')
     return "\n".join(lines)
+
+
+def _estimate_line(item: Item, estimate: PriceEstimate | None) -> str | None:
+    """Market-estimate line: 💎 full score, 📊 small sample, None with no data."""
+    if estimate is None or estimate.sample_size == 0:
+        return None
+    if (
+        estimate.score is None
+        or estimate.median is None
+        or estimate.discount_pct is None
+    ):
+        return f"📊 Storico insufficiente per una stima (n={estimate.sample_size})"
+
+    pct = round(estimate.discount_pct * 100)
+    sign = "−" if pct >= 0 else "+"
+    return (
+        f"💎 Affare: {estimate.score}/100 · {sign}{abs(pct)}%"
+        f" vs ~{estimate.median:.2f} {item.price.currency}"
+        f" ({estimate.sample_size} annunci)"
+    )
 
 
 def _escape(value: str) -> str:

@@ -15,7 +15,7 @@ import pytest
 
 from vintedbot.db import get_connection
 from vintedbot.models import Item
-from vintedbot.repository import ItemRepository
+from vintedbot.repository import ItemRepository, PriceRepository, normalize_brand
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -216,6 +216,148 @@ def test_photo_urls_and_published_at_round_trip(repo: ItemRepository) -> None:
 
     assert rebuilt.photo_urls == ("https://img/1.jpeg", "https://img/2.jpeg")
     assert rebuilt.published_at == item.published_at  # aware, identico
+
+
+# =============================================== PriceRepository (step 4.1)
+
+
+@pytest.fixture()
+def price_repo(conn: sqlite3.Connection) -> PriceRepository:
+    return PriceRepository(conn)
+
+
+def test_record_observations_dedups_within_batch(
+    price_repo: PriceRepository, conn: sqlite3.Connection
+) -> None:
+    batch = [make_item(1), make_item(2), make_item(1)]  # id 1 duplicato nel run
+
+    written = price_repo.record_observations(batch, catalog_id=257)
+
+    assert written == 2
+    assert price_repo.count_observations() == 2
+
+
+def test_same_item_in_two_runs_gives_two_observations(
+    price_repo: PriceRepository, conn: sqlite3.Connection
+) -> None:
+    # Voluto: un annuncio riapparso (magari ribassato) è informazione.
+    price_repo.record_observations([make_item(1, price="20.0")], catalog_id=257)
+    price_repo.record_observations([make_item(1, price="15.0")], catalog_id=257)
+
+    rows = conn.execute(
+        "SELECT price FROM price_observations WHERE item_id = 1 ORDER BY id"
+    ).fetchall()
+    assert [row["price"] for row in rows] == ["20.0", "15.0"]
+
+
+def test_brand_is_normalized_to_one_key(
+    price_repo: PriceRepository, conn: sqlite3.Connection
+) -> None:
+    price_repo.record_observations([make_item(1, brand="Nike")], catalog_id=None)
+    price_repo.record_observations([make_item(2, brand="  nike ")], catalog_id=None)
+
+    brands = {
+        row["brand"] for row in conn.execute("SELECT brand FROM price_observations")
+    }
+    assert brands == {"nike"}
+    assert normalize_brand("  ") is None  # vuoto → NULL, mai stringa vuota
+
+
+def test_observation_price_decimal_round_trip(
+    price_repo: PriceRepository, conn: sqlite3.Connection
+) -> None:
+    price_repo.record_observations([make_item(1, price="12.50")], catalog_id=257)
+
+    row = conn.execute("SELECT price, currency, catalog_id FROM price_observations").fetchone()
+    assert row["price"] == "12.50"
+    assert Decimal(row["price"]) == Decimal("12.50")
+    assert row["catalog_id"] == 257
+
+
+def test_purge_observations_only_beyond_threshold(
+    price_repo: PriceRepository, conn: sqlite3.Connection
+) -> None:
+    now = datetime.now(tz=UTC)
+    with conn:
+        for item_id, days_ago in ((1, 40), (2, 5)):
+            conn.execute(
+                "INSERT INTO price_observations"
+                " (item_id, brand, catalog_id, size, condition, price, currency, observed_at)"
+                " VALUES (?, 'nike', 257, 'M', NULL, '10.0', 'EUR', ?)",
+                (item_id, (now - timedelta(days=days_ago)).isoformat()),
+            )
+
+    assert price_repo.purge_observations_older_than(30) == 1
+    remaining = conn.execute("SELECT item_id FROM price_observations").fetchall()
+    assert [row["item_id"] for row in remaining] == [2]
+
+    with pytest.raises(ValueError, match="positive"):
+        price_repo.purge_observations_older_than(0)
+
+
+def test_get_observations_dedups_per_item_keeping_latest(
+    price_repo: PriceRepository,
+) -> None:
+    price_repo.record_observations([make_item(1, price="20.0")], catalog_id=257)
+    price_repo.record_observations([make_item(1, price="15.0")], catalog_id=257)  # ribasso
+
+    observations = price_repo.get_observations("Nike", 257, max_age_days=90)
+
+    assert len(observations) == 1                    # 2 righe in tabella, 1 per la stima
+    assert observations[0].price == Decimal("15.0")  # vince la PIÙ RECENTE
+
+
+def test_get_observations_respects_time_window_and_normalization(
+    price_repo: PriceRepository, conn: sqlite3.Connection
+) -> None:
+    price_repo.record_observations([make_item(1)], catalog_id=257)
+    with conn:  # osservazione vecchia iniettata a mano
+        conn.execute(
+            "INSERT INTO price_observations"
+            " (item_id, brand, catalog_id, size, condition, price, currency, observed_at)"
+            " VALUES (2, 'nike', 257, 'M', NULL, '99.0', 'EUR', ?)",
+            ((datetime.now(tz=UTC) - timedelta(days=120)).isoformat(),),
+        )
+
+    observations = price_repo.get_observations("  NIKE ", 257, max_age_days=90)
+
+    assert [o.item_id for o in observations] == [1]  # la vecchia è fuori finestra
+    assert price_repo.get_observations("nike", 999, max_age_days=90) == []  # catalog diverso
+
+
+def test_mark_skipped_excludes_from_queue(repo: ItemRepository) -> None:
+    repo.mark_seen([make_item(1), make_item(2)])
+
+    assert repo.mark_skipped([1]) == 1
+    assert repo.mark_skipped([1]) == 0  # idempotente
+
+    assert [item.id for item in repo.get_unnotified(limit=10)] == [2]
+    assert repo.count_unnotified() == 1
+
+
+def test_mark_seen_persists_scores(repo: ItemRepository, conn: sqlite3.Connection) -> None:
+    repo.mark_seen([make_item(1), make_item(2)], scores={1: 78, 2: None})
+
+    rows = {
+        row["item_id"]: row["score"]
+        for row in conn.execute("SELECT item_id, score FROM seen_items")
+    }
+    assert rows == {1: 78, 2: None}
+
+
+def test_stats_groups_by_brand_and_catalog(price_repo: PriceRepository) -> None:
+    price_repo.record_observations(
+        [make_item(1, brand="Nike"), make_item(2, brand="Nike"), make_item(3, brand="Puma")],
+        catalog_id=257,
+    )
+    price_repo.record_observations([make_item(4, brand="Nike")], catalog_id=None)
+
+    stats = price_repo.stats()
+
+    as_tuples = {(s.brand, s.catalog_id): s.observations for s in stats}
+    assert as_tuples == {("nike", 257): 2, ("puma", 257): 1, ("nike", None): 1}
+    assert stats[0].observations == 2  # ordinati per numerosità decrescente
+    assert all(s.first_observed_at <= s.last_observed_at for s in stats)
 
 
 # ------------------------------------------------------- (i) round-trip prezzo

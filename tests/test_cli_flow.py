@@ -70,6 +70,11 @@ def _db_count(db_path: Path) -> int:
         return int(conn.execute("SELECT COUNT(*) FROM seen_items").fetchone()[0])
 
 
+def _observations_count(db_path: Path) -> int:
+    with closing(sqlite3.connect(db_path)) as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM price_observations").fetchone()[0])
+
+
 ARGS = ["search", "--catalog", "2536", "--size", "208", "--max-price", "20"]
 
 
@@ -128,6 +133,111 @@ def test_all_flag_shows_everything_without_writing(
     assert _db_count(db_path) == count_before  # nessuna scrittura
 
 
+# ------------------------------------- osservazioni prezzo (step 4.1)
+
+
+def test_search_records_price_observations(
+    capsys: pytest.CaptureFixture[str], db_path: Path, fixture_items: list[Item]
+) -> None:
+    assert main(ARGS) == 0
+
+    # Una osservazione per item della fixture, attribuita al catalog 2536.
+    assert _observations_count(db_path) == len(fixture_items)
+    with closing(sqlite3.connect(db_path)) as conn:
+        catalogs = {
+            row[0] for row in conn.execute("SELECT DISTINCT catalog_id FROM price_observations")
+        }
+    assert catalogs == {2536}
+    assert f"{len(fixture_items)} osservazioni prezzo registrate" in capsys.readouterr().out
+
+    # Secondo run: gli item sono già visti ma i prezzi vengono ri-osservati.
+    assert main(ARGS) == 0
+    assert _observations_count(db_path) == 2 * len(fixture_items)
+
+
+def test_all_flag_still_records_observations(
+    capsys: pytest.CaptureFixture[str], db_path: Path, fixture_items: list[Item]
+) -> None:
+    assert main([*ARGS, "--all"]) == 0
+
+    # --all: osservare non è notificare — prezzi registrati, seen_items intatto.
+    assert _observations_count(db_path) == len(fixture_items)
+    assert _db_count(db_path) == 0
+
+
+def test_stats_command_reflects_recorded_data(
+    capsys: pytest.CaptureFixture[str], db_path: Path
+) -> None:
+    assert main(ARGS) == 0
+    capsys.readouterr()
+
+    rc = main(["stats"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Storico osservazioni prezzo" in out
+    assert "2536" in out  # la categoria della ricerca
+    assert "osservazioni totali" in out
+
+
+def test_purge_days_also_purges_observations(db_path: Path) -> None:
+    assert main(ARGS) == 0
+    # invecchia artificialmente le osservazioni e i seen_items
+    with closing(sqlite3.connect(db_path)) as conn, conn:
+        conn.execute("UPDATE price_observations SET observed_at = '2020-01-01T00:00:00+00:00'")
+        conn.execute("UPDATE seen_items SET first_seen_at = '2020-01-01T00:00:00+00:00'")
+
+    assert main([*ARGS, "--purge-days", "30"]) == 0
+
+    # le vecchie osservazioni sono sparite; restano solo quelle del run appena fatto
+    with closing(sqlite3.connect(db_path)) as conn:
+        old = conn.execute(
+            "SELECT COUNT(*) FROM price_observations WHERE observed_at < '2021-01-01'"
+        ).fetchone()[0]
+    assert old == 0
+
+
+# ------------------------------------------------- backfill (step 4.2)
+
+
+def test_backfill_records_only_observations(
+    capsys: pytest.CaptureFixture[str], db_path: Path, fixture_items: list[Item]
+) -> None:
+    rc = main(["backfill", "--catalog", "2536", "--max-price", "20"])
+
+    assert rc == 0
+    assert _observations_count(db_path) == len(fixture_items)
+    assert _db_count(db_path) == 0  # seen_items MAI toccato dal backfill
+    captured = capsys.readouterr()
+    assert "--max-price è IGNORATO" in captured.err  # warning esplicito
+    assert "osservazioni nuove" in captured.out
+    assert "Mediana" in captured.out  # snapshot per brand
+
+
+# --------------------------------------- validazioni --min-score (l)
+
+
+@pytest.mark.parametrize("bad", ["150", "-1"])
+def test_min_score_out_of_range_fails_cleanly(
+    capsys: pytest.CaptureFixture[str], bad: str
+) -> None:
+    rc = main([*ARGS, "--min-score", bad])
+
+    assert rc != 0
+    captured = capsys.readouterr()
+    assert "--min-score" in captured.err
+    assert "Traceback" not in captured.err + captured.out
+
+
+def test_strict_score_without_min_score_fails(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = main([*ARGS, "--strict-score"])
+
+    assert rc != 0
+    assert "--strict-score richiede --min-score" in capsys.readouterr().err
+
+
 # ------------------------------------------- (d) --purge-days invalido
 
 
@@ -150,7 +260,7 @@ def test_invalid_purge_days_fails_cleanly(
 def test_failed_rendering_does_not_mark_items_seen(
     monkeypatch: pytest.MonkeyPatch, db_path: Path
 ) -> None:
-    def exploding_render(console: object, items: list[Item]) -> None:
+    def exploding_render(console: object, items: list[Item], estimates: object) -> None:
         raise RuntimeError("terminal on fire")
 
     monkeypatch.setattr(vintedbot.cli, "_render_items_table", exploding_render)
