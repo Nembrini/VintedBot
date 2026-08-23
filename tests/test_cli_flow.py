@@ -54,12 +54,14 @@ def _wire_fakes(
     monkeypatch: pytest.MonkeyPatch, db_path: Path, fixture_items: list[Item]
 ) -> None:
     """Point the app at a tmp DB and a fake client serving the fixture."""
-    settings = Settings(_env_file=None, db_path=db_path)  # type: ignore[call-arg]
+    settings = Settings(_env_file=None, db_path=db_path, data_dir=db_path.parent)  # type: ignore[call-arg]
     monkeypatch.setattr(vintedbot.cli, "get_settings", lambda: settings)
     # setup_logging configurerebbe structlog sul sys.stderr catturato da
     # capsys e lo cacherebbe: i test successivi scriverebbero su un file
     # chiuso. Nei test il logging resta sulla configurazione di default.
-    monkeypatch.setattr(vintedbot.cli, "setup_logging", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        vintedbot.cli, "setup_logging_from_settings", lambda *a, **kw: None
+    )
     monkeypatch.setattr(
         vintedbot.app, "VintedClient", lambda _settings: FakeClient({1: fixture_items})
     )

@@ -1,0 +1,31 @@
+# Ricerche salvate eseguite da `vintedbot run-all`.
+#
+# Copia questo file in searches.toml e adattalo: searches.toml contiene le
+# TUE ricerche e non è versionato.
+#
+# I campi ricalcano esattamente le opzioni del comando `search`. Categoria,
+# brand, taglia e condizione sono ID NUMERICI Vinted, non nomi: per
+# scoprirli applica il filtro sul sito e leggi l'URL, oppure consulta la
+# tabella in docs/api_notes.md. Ogni campo "plurale" accetta un singolo ID
+# o una lista.
+
+[[search]]
+name = "cavalli-jeans"          # identificativo univoco, compare nei log
+enabled = true
+catalog = 257                   # jeans uomo
+brand = [1965, 20117]           # Roberto Cavalli, Just Cavalli
+size = [208, 209, 210]          # M, L, XL (uomo)
+max_price = 100
+max_pages = 1
+min_score = 60                  # notifica solo gli affari; assente = filtro OFF
+strict_score = false            # true = scarta anche gli annunci senza punteggio
+
+[[search]]
+name = "giubbotti-m-economici"
+enabled = false                 # messa in pausa: run-all la salta
+catalog = 2536                  # giacche e capispalla uomo
+size = 208                      # M
+keyword = "piumino"
+max_price = 20
+max_pages = 2
+# min_score assente: nessun filtro affare, notifica tutti i nuovi

@@ -14,13 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import statistics
+import time
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import structlog
 
-from vintedbot.client import VintedClient
+from vintedbot.client import VintedClient, VintedError
 from vintedbot.db import get_connection
 from vintedbot.notifier import TelegramError, TelegramNotifier, is_fatal_config_error
 from vintedbot.pricing import PriceEstimate, estimate
@@ -35,12 +36,33 @@ if TYPE_CHECKING:
     from vintedbot.models import Item, SearchFilters
     from vintedbot.repository import PriceObservation
     from vintedbot.search import PagedSearchResult
+    from vintedbot.searches import SavedSearch
 
 logger = structlog.get_logger(__name__)
 
 #: Quanta coda leggere PRIMA di valutare/ordinare/troncare al cap: il
 #: taglio anti-valanga deve avvenire DOPO l'ordinamento per punteggio.
 _QUEUE_FETCH_LIMIT = 200
+
+
+@dataclass(slots=True)
+class NotificationBudget:
+    """Anti-flood allowance, shared across everything one command sends.
+
+    A single ``search`` gets a fresh budget; ``run-all`` creates ONE budget
+    for the whole execution, so five saved searches cannot each spend the
+    full ``max_notifications_per_run``. Send attempts are what gets
+    charged: this bounds outgoing traffic even when sends fail.
+    """
+
+    remaining: int
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> NotificationBudget:
+        return cls(remaining=settings.max_notifications_per_run)
+
+    def spend(self, amount: int) -> None:
+        self.remaining = max(0, self.remaining - amount)
 
 
 class PriceEvaluator:
@@ -109,6 +131,7 @@ async def run_search(
     notify: bool = True,
     min_score: int | None = None,
     strict_score: bool = False,
+    budget: NotificationBudget | None = None,
     render: Callable[[list[Item], dict[int, PriceEstimate]], None],
 ) -> SearchOutcome:
     """Run the full search flow and return its outcome.
@@ -157,17 +180,18 @@ async def run_search(
         )
 
         evaluator = PriceEvaluator(price_repo, settings)
-        estimates: dict[int, PriceEstimate] = {}
         if show_all:
             shown_items = result.items
             already_seen = 0
         else:
             shown_items = repo.filter_new(result.items)
             already_seen = len(result.items) - len(shown_items)
-            estimates = {
-                item.id: evaluator.estimate_for(item, observed_catalog_id)
-                for item in shown_items
-            }
+        # Anche in modalità consultazione (--all / --dry-run) i punteggi
+        # servono: sono il motivo per cui si guarda la tabella.
+        estimates: dict[int, PriceEstimate] = {
+            item.id: evaluator.estimate_for(item, observed_catalog_id)
+            for item in shown_items
+        }
 
         if shown_items:
             render(shown_items, estimates)
@@ -199,6 +223,9 @@ async def run_search(
                     catalog_id=observed_catalog_id,
                     min_score=min_score,
                     strict_score=strict_score,
+                    budget=budget if budget is not None else NotificationBudget.from_settings(
+                        settings
+                    ),
                 )
                 queue_remaining = repo.count_unnotified()
                 if queue_remaining:
@@ -234,6 +261,169 @@ async def run_search(
         notify_failed=outcome.notify_failed,
     )
     return outcome
+
+
+@dataclass(frozen=True, slots=True)
+class SearchRunReport:
+    """How one saved search fared inside a ``run-all`` execution."""
+
+    name: str
+    outcome: SearchOutcome | None
+    error: str | None = None
+
+    @property
+    def failed(self) -> bool:
+        return self.error is not None
+
+
+@dataclass(frozen=True, slots=True)
+class RunAllOutcome:
+    """Aggregate result of one ``run-all`` execution."""
+
+    reports: list[SearchRunReport]
+    aborted_reason: str | None = None
+    timed_out: bool = False
+    skipped_searches: list[str] = field(default_factory=list)
+
+    @property
+    def failed_count(self) -> int:
+        return sum(report.failed for report in self.reports)
+
+    @property
+    def ok(self) -> bool:
+        return (
+            self.aborted_reason is None and not self.timed_out and self.failed_count == 0
+        )
+
+
+async def run_all(
+    settings: Settings,
+    searches: list[SavedSearch],
+    *,
+    dry_run: bool = False,
+    deadline_seconds: float | None = None,
+    render: Callable[[str, list[Item], dict[int, PriceEstimate]], None],
+) -> RunAllOutcome:
+    """Execute the enabled saved searches IN SEQUENCE — the scheduled entry point.
+
+    Design points, all deliberate:
+
+    - ``seen_items`` stays GLOBAL per item id: an ad matching two searches
+      is notified once, by whichever search sees it first;
+    - ONE :class:`NotificationBudget` for the whole execution, so N
+      searches cannot send N times ``max_notifications_per_run``;
+    - a pause of ``delay_between_searches_seconds`` between searches, on
+      top of the client's own rate limiting;
+    - a failing search (network, parsing…) is logged and reported but does
+      NOT stop the others; a fatal Telegram configuration error does abort
+      everything — insisting would be pointless.
+
+    ``dry_run`` runs the consultation path (like ``--all``): tables and
+    scores are produced, price observations are recorded, but nothing is
+    written to ``seen_items`` and nothing is notified.
+
+    ``deadline_seconds`` arms a watchdog: once the budget of wall-clock
+    time is spent the run stops between searches — or cancels the search
+    in flight at an ``await`` point, never inside a transaction — and the
+    searches left out are named in the outcome. A run that hangs would
+    otherwise hold the lock and starve every following one.
+    """
+    budget = NotificationBudget.from_settings(settings)
+    enabled = [search for search in searches if search.enabled]
+    reports: list[SearchRunReport] = []
+    aborted_reason: str | None = None
+    timed_out = False
+    started = time.monotonic()
+
+    def time_left() -> float | None:
+        if deadline_seconds is None:
+            return None
+        return deadline_seconds - (time.monotonic() - started)
+
+    for position, search in enumerate(enabled):
+        remaining = time_left()
+        if remaining is not None and remaining <= 0:
+            timed_out = True
+            break
+
+        if position > 0 and settings.delay_between_searches_seconds > 0:
+            await asyncio.sleep(settings.delay_between_searches_seconds)
+
+        log = logger.bind(search=search.name)
+        log.info("saved_search_started", dry_run=dry_run)
+
+        def render_for(
+            items: list[Item],
+            estimates: dict[int, PriceEstimate],
+            _name: str = search.name,
+        ) -> None:
+            render(_name, items, estimates)
+
+        coroutine = run_search(
+            settings,
+            search.to_filters(),
+            max_pages=search.max_pages,
+            max_items=search.max_items,
+            show_all=dry_run,
+            purge_days=None,
+            notify=not dry_run,
+            min_score=search.min_score,
+            strict_score=search.strict_score,
+            budget=budget,
+            render=render_for,
+        )
+        try:
+            remaining = time_left()
+            if remaining is None:
+                outcome = await coroutine
+            else:
+                # wait_for cancella a un punto di await: le transazioni
+                # SQLite sono sincrone, quindi nessuna resta a metà.
+                outcome = await asyncio.wait_for(coroutine, timeout=remaining)
+        except TimeoutError:
+            timed_out = True
+            log.warning("saved_search_timed_out", deadline_seconds=deadline_seconds)
+            break
+        except VintedError as exc:
+            # Una ricerca rotta non deve azzoppare le altre.
+            log.warning("saved_search_failed", error=str(exc), error_type=type(exc).__name__)
+            reports.append(SearchRunReport(name=search.name, outcome=None, error=str(exc)))
+            continue
+
+        reports.append(SearchRunReport(name=search.name, outcome=outcome))
+
+        if outcome.notify_error is not None:
+            # Token invalido / chat inesistente: proseguire è inutile.
+            aborted_reason = outcome.notify_error
+            log.error("run_all_aborted", reason=aborted_reason)
+            break
+
+    done = {report.name for report in reports}
+    skipped = [search.name for search in enabled if search.name not in done]
+
+    if timed_out:
+        logger.error(
+            "run_all_deadline_exceeded",
+            deadline_seconds=deadline_seconds,
+            executed=len(reports),
+            skipped=skipped,
+        )
+
+    logger.info(
+        "run_all_done",
+        executed=len(reports),
+        failed=sum(report.failed for report in reports),
+        aborted=aborted_reason is not None,
+        timed_out=timed_out,
+        skipped=len(skipped),
+        notifications_left=budget.remaining,
+    )
+    return RunAllOutcome(
+        reports=reports,
+        aborted_reason=aborted_reason,
+        timed_out=timed_out,
+        skipped_searches=skipped,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,6 +517,7 @@ async def _notify_queue(
     catalog_id: int | None,
     min_score: int | None,
     strict_score: bool,
+    budget: NotificationBudget,
 ) -> tuple[int, int, int, str | None]:
     """Drain the notification queue; returns (sent, failed, skipped, fatal_error).
 
@@ -335,8 +526,8 @@ async def _notify_queue(
     DEFINITIVELY skipped (``skipped_at``: they never re-enter the queue);
     score None passes unless ``strict_score``. Survivors are sorted by
     score DESC — when the anti-flood cap truncates, the best deals go
-    first — then at most ``max_notifications_per_run`` are sent, pausing
-    between sends, each success marked notified immediately.
+    first — then at most ``budget.remaining`` are sent, pausing between
+    sends, each success marked notified immediately.
     """
     candidates = repo.get_unnotified(_QUEUE_FETCH_LIMIT)
     if not candidates:
@@ -373,7 +564,8 @@ async def _notify_queue(
         key=lambda pair: pair[1].score if pair[1].score is not None else -1,
         reverse=True,
     )
-    queue = sendable[: settings.max_notifications_per_run]
+    queue = sendable[: budget.remaining]
+    budget.spend(len(queue))
 
     sent = failed = 0
     if queue:
