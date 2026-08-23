@@ -49,6 +49,37 @@ Flag aggiuntivi:
 - `--purge-days N` — prima della ricerca elimina i record visti da più
   di N giorni (N deve essere positivo).
 
+## Come funziona il tracking dei doppioni
+
+Ogni annuncio mostrato viene registrato in una tabella `seen_items` del
+DB SQLite (`VINTEDBOT_DB_PATH`, default `data/vintedbot.db`): id Vinted,
+titolo, prezzo (stringa decimale), valuta, brand, URL, `first_seen_at`
+(UTC ISO-8601) e `notified_at` (NULL finché non esisteranno le notifiche,
+step 3). Alle esecuzioni successive gli id già presenti vengono filtrati
+e non riappaiono.
+
+- **Azzerare il tracking**: eliminare il file del DB (`data/vintedbot.db`
+  più gli eventuali `-wal`/`-shm`); verrà ricreato alla prossima
+  esecuzione e tutti gli annunci torneranno "nuovi".
+- **`--purge-days N`**: pulizia selettiva — elimina solo i record visti
+  da più di N giorni (utile per non far crescere il DB all'infinito).
+- **Nota**: può capitare che un'esecuzione ravvicinata mostri come
+  "nuovi" annunci con data di pubblicazione vecchia: sono annunci
+  rientrati nella prima pagina (bump/riattivazione lato Vinted). È il
+  comportamento corretto del dedup: mai visti prima → mostrati una volta.
+
+### Procedura di collaudo riproducibile
+
+1. Suite verde senza rete: `uv run pytest` (47 test).
+2. Stato noto: rimuovere `data/vintedbot.db` se presente.
+3. `uv run vintedbot search --catalog 2536 --size 208 --max-price 20
+   --max-pages 1` → attesi *N nuovi / 0 già visti / N totali*, DB creato
+   con N righe (`notified_at` NULL, prezzi stringhe decimali).
+4. Stesso comando subito dopo → attesi 0 nuovi ("Nessun nuovo annuncio",
+   exit 0) o pochissimi annunci realmente mai visti (vedi Nota sopra).
+5. Stesso comando con `--all` → tutti gli item di nuovo visibili,
+   conteggio righe del DB invariato.
+
 ## Comandi di sviluppo
 
 ```bash
