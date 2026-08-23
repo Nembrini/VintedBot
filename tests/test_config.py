@@ -16,6 +16,8 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "VINTEDBOT_RATE_LIMIT_PER_MINUTE",
         "VINTEDBOT_REQUEST_TIMEOUT_SECONDS",
         "VINTEDBOT_CONNECT_TIMEOUT_SECONDS",
+        "VINTEDBOT_SEARCH_MAX_PAGES",
+        "VINTEDBOT_SEARCH_MAX_ITEMS",
         "VINTEDBOT_LOG_LEVEL",
         "VINTEDBOT_LOG_JSON",
     ):
@@ -32,6 +34,8 @@ def test_defaults() -> None:
     assert str(s.base_url) == "https://www.vinted.it/"
     assert s.rate_limit_per_minute == 12
     assert s.request_timeout_seconds == 30.0
+    assert s.search_max_pages == 5
+    assert s.search_max_items == 200
     assert s.log_level == "INFO"
     assert s.log_json is False
 

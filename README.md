@@ -21,10 +21,25 @@ uv sync            # crea .venv e installa dipendenze (incluse quelle dev)
 cp .env.example .env   # opzionale: personalizza la configurazione
 ```
 
-## Comandi
+## Uso
 
 ```bash
-uv run pytest          # test
+# ricerca con filtri (ID categoria/taglia: vedi docs/api_notes.md)
+uv run vintedbot search --catalog 2536 --size 208 --max-price 20
+
+# equivalente:
+uv run python -m vintedbot search --keyword "giubbotto" --max-pages 2
+```
+
+Opzioni di `search`: `--keyword`, `--catalog ID`, `--brand ID`, `--size ID`,
+`--condition ID` (tutte ripetibili), `--min-price`, `--max-price`,
+`--max-pages`, `--max-items`. Output: tabella ordinata per data di
+pubblicazione decrescente + riga di riepilogo.
+
+## Comandi di sviluppo
+
+```bash
+uv run pytest          # test (nessuna chiamata di rete: fixture reali + mock)
 uv run mypy            # type check (strict)
 uv run ruff check .    # lint
 ```
@@ -43,6 +58,9 @@ src/vintedbot/     codice applicativo (tipizzato, py.typed)
   log.py           logging strutturato (structlog)
   models.py        SearchFilters / Item (parsing tollerante del JSON API)
   client.py        VintedClient async (curl_cffi, rate limit, retry)
+  search.py        search_all: paginazione sequenziale + dedup + limiti
+  cli.py           CLI argparse + tabella rich (unico layer con print)
+  __main__.py      python -m vintedbot
 tests/             test pytest (+ fixtures/ con risposta API reale)
 docs/api_notes.md  reverse engineering dell'endpoint di ricerca Vinted
 ```
@@ -53,4 +71,7 @@ docs/api_notes.md  reverse engineering dell'endpoint di ricerca Vinted
 - [x] 1.2 Setup progetto (uv, config, logging, test)
 - [x] 1.3 Modelli dati Pydantic (`models.py`)
 - [x] 1.4 Client HTTP async (`client.py`) — verificato live 2026-08-23
-- [ ] 1.5 Paginazione completa
+- [x] 1.5 Ricerca paginata (`search.py`)
+- [x] 1.6 CLI con output rich (`cli.py`)
+- [x] 1.7 Test suite (24 test, zero rete)
+- [ ] 2. Persistenza SQLite (dedup tra esecuzioni)

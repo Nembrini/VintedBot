@@ -47,6 +47,18 @@ class Settings(BaseSettings):
         le=60,
         description="Connect timeout for HTTP calls (seconds).",
     )
+    search_max_pages: int = Field(
+        default=5,
+        ge=1,
+        le=50,
+        description="Default page cap for a paginated search (be gentle).",
+    )
+    search_max_items: int = Field(
+        default=200,
+        ge=1,
+        le=2000,
+        description="Default item cap for a paginated search.",
+    )
     log_level: LogLevel = Field(
         default="INFO",
         description="Minimum log level.",
