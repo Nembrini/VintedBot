@@ -60,6 +60,7 @@ src/vintedbot/     codice applicativo (tipizzato, py.typed)
   client.py        VintedClient async (curl_cffi, rate limit, retry)
   search.py        search_all: paginazione sequenziale + dedup + limiti
   db.py            SQLite: apertura, migrazioni (user_version), pragmas
+  repository.py    ItemRepository: tutte le query su seen_items (unico SQL)
   cli.py           CLI argparse + tabella rich (unico layer con print)
   __main__.py      python -m vintedbot
 tests/             test pytest (+ fixtures/ con risposta API reale)
@@ -76,4 +77,5 @@ docs/api_notes.md  reverse engineering dell'endpoint di ricerca Vinted
 - [x] 1.6 CLI con output rich (`cli.py`)
 - [x] 1.7 Test suite (zero rete)
 - [x] 2.1 Modulo DB SQLite (`db.py`: schema seen_items, migrazioni)
-- [ ] 2.2 Repository (accesso dati per il flusso di ricerca)
+- [x] 2.2 Repository (`repository.py`: filter_new, mark_seen, purge, count)
+- [ ] 2.3 Integrazione nel CLI (dedup tra esecuzioni)
