@@ -1,6 +1,5 @@
 # Secrets / local config
 .env
-.env.example
 .env.bak*
 .env.*.local
 searches.toml

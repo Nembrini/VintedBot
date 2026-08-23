@@ -14,7 +14,7 @@ from vintedbot.log import LOG_FILENAME, setup_logging, setup_logging_from_settin
 if TYPE_CHECKING:
     from pathlib import Path
 
-TOKEN = "8602500222:AAFCPCr7ZprKAjBQOgtjv5X4EOcsggPvDYg"
+TOKEN = "123456789:AAfaketokenfaketokenfaketoken"
 
 
 @pytest.fixture(autouse=True)
@@ -90,7 +90,7 @@ def test_token_never_reaches_the_log_even_through_tracebacks(tmp_path: Path) -> 
         _env_file=None,
         data_dir=tmp_path,
         telegram_bot_token=TOKEN,
-        telegram_chat_id="696061308",
+        telegram_chat_id="998877665",
     )
     setup_logging_from_settings(settings)
     logger = structlog.get_logger("test")
@@ -106,11 +106,11 @@ def test_token_never_reaches_the_log_even_through_tracebacks(tmp_path: Path) -> 
     except ConnectionError:
         logger.exception("richiesta_fallita")
     # 3. il chat_id
-    logger.info("invio", chat_id="696061308")
+    logger.info("invio", chat_id="998877665")
 
     content = read_log(log_dir)
     assert TOKEN not in content
-    assert "696061308" not in content
+    assert "998877665" not in content
     assert content.count("***REDACTED***") >= 3
     assert "richiesta_fallita" in content  # il resto del log sopravvive
 
